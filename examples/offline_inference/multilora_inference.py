@@ -30,7 +30,7 @@ def create_test_prompts(
         (
             "A robot may not injure a human being",
             SamplingParams(
-                temperature=0.0, logprobs=1, prompt_logprobs=1, max_tokens=128
+                temperature=0.0, logprobs=1, max_tokens=128
             ),
             None,
         ),
@@ -46,7 +46,7 @@ def create_test_prompts(
             SamplingParams(
                 temperature=0.0,
                 logprobs=1,
-                prompt_logprobs=1,
+                #prompt_logprobs=1,
                 max_tokens=128,
                 stop_token_ids=[32003],
             ),
@@ -57,7 +57,7 @@ def create_test_prompts(
             SamplingParams(
                 temperature=0.0,
                 logprobs=1,
-                prompt_logprobs=1,
+                #prompt_logprobs=1,
                 max_tokens=128,
                 stop_token_ids=[32003],
             ),
@@ -99,14 +99,14 @@ def initialize_engine() -> LLMEngine:
     #   numbers will cause higher memory usage. If you know that all LoRAs will
     #   use the same rank, it is recommended to set this as low as possible.
     # max_cpu_loras: controls the size of the CPU LoRA cache.
-    engine_args = EngineArgs(
-        model="meta-llama/Llama-2-7b-hf",
-        enable_lora=True,
-        max_loras=1,
-        max_lora_rank=8,
-        max_cpu_loras=2,
-        max_num_seqs=256,
-    )
+    engine_args = EngineArgs(model="meta-llama/Llama-2-7b-hf",
+                             enable_lora=True,
+                             max_loras=1,
+                             max_lora_rank=8,
+                             max_cpu_loras=2,
+                             max_num_seqs=256,
+                             enforce_eager=True,
+                             block_size=64)
     return LLMEngine.from_engine_args(engine_args)
 
 
