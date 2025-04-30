@@ -17,6 +17,7 @@ from vllm.distributed import get_pp_group
 from vllm.forward_context import set_forward_context
 from vllm.inputs import INPUT_REGISTRY, InputRegistry
 from vllm.logger import init_logger
+from vllm.distributed.kv_transfer import get_kv_transfer_group
 from vllm.model_executor import SamplingMetadataCache
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.model_loader import get_model
@@ -540,6 +541,59 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPUWithSamplingMetadata]):
                                    sampling_metadata=sampling_metadata,
                                    virtual_engine=virtual_engine)
 
+    def need_recv_kv(self, model_input, kv_caches) -> bool:
+        """Check if we need to receive kv-cache from the other worker.
+        We need to receive KV when
+            1. current vLLM instance is KV cache consumer/decode vLLM instance
+            2. this batch is not a profiling run
+            3. this batch is a prefill run
+
+        Args:
+            model_input: input to the model executable
+            kv_caches: vLLM's paged memory
+        """
+        if kv_caches is None:
+            return False
+        if self.vllm_config.kv_transfer_config is None:
+            return False
+
+        prefill_meta = model_input.attn_metadata.prefill_metadata
+
+        # check if the current run is profiling
+        is_profile_run = (kv_caches[0].numel() == 0)
+        # check if the current run is prefill
+        is_prefill_run = prefill_meta is not None
+
+        return self.vllm_config.kv_transfer_config.is_kv_consumer and (
+            not is_profile_run) and is_prefill_run
+
+    def need_send_kv(self, model_input, kv_caches) -> bool:
+        """Check if we need to send kv-cache to the other worker.
+        We need to send KV when
+            1. current vLLM instance is KV cache producer/prefill vLLM instance
+            2. this batch is not a profiling run
+            3. this batch is a prefill run
+
+        Args:
+            model_input: input to the model executable
+            kv_caches: vLLM's paged memory
+        """
+        if kv_caches is None:
+            return False
+        # import pudb.remote; pudb.remote.set_trace()
+        if self.vllm_config.kv_transfer_config is None:
+            return False
+
+        prefill_meta = model_input.attn_metadata.prefill_metadata
+
+        # check if the current run is profiling
+        is_profile_run = (kv_caches[0].numel() == 0)
+        # check if the current run is prefill
+        is_prefill_run = prefill_meta is not None
+
+        return self.vllm_config.kv_transfer_config.is_kv_producer and (
+            not is_profile_run) and is_prefill_run
+
     @torch.inference_mode()
     def execute_model(
         self,
@@ -551,20 +605,39 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPUWithSamplingMetadata]):
         if num_steps > 1:
             raise ValueError(
                 "XPUModelRunner does not support multi-step execution.")
-
+        # Receive KV cache in distributed KV cache transfer setting
+        # In disagg prefill setting, it will also recv hidden states and bypass
+        # model forwarding
+        # In KV cache database setting, it will change the model input so that
+        # we can skip prefilling on tokens that successfully received KV caches
+        # NOTE: The receive operation is blocking
+        bypass_model_exec = False
         model_executable = self.model
+
+        if self.need_recv_kv(model_input, kv_caches):
+            hidden_or_intermediate_states, bypass_model_exec, model_input = \
+                get_kv_transfer_group().recv_kv_caches_and_hidden_states(
+                    # model is used to know which layer the current worker
+                    # is working on, so that we can receive KV for only those
+                    # layers.
+                    model_executable,
+                    model_input,
+                    kv_caches=kv_caches
+                )
+
         if (self.observability_config is not None
                 and self.observability_config.collect_model_forward_time):
             model_forward_start_time = time.time()
-        with set_forward_context(model_input.attn_metadata, self.vllm_config,
-                                 model_input.virtual_engine):
-            hidden_or_intermediate_states = model_executable(
-                input_ids=model_input.input_tokens,
-                positions=model_input.input_positions,
-                intermediate_tensors=intermediate_tensors,
-                **MultiModalKwargs.as_kwargs(model_input.multi_modal_kwargs
-                                             or {},
-                                             device=self.device))
+        if not bypass_model_exec:
+            with set_forward_context(model_input.attn_metadata, self.vllm_config,
+                                    model_input.virtual_engine):
+                hidden_or_intermediate_states = model_executable(
+                    input_ids=model_input.input_tokens,
+                    positions=model_input.input_positions,
+                    intermediate_tensors=intermediate_tensors,
+                    **MultiModalKwargs.as_kwargs(model_input.multi_modal_kwargs
+                                                or {},
+                                                device=self.device))
         # Compute the logits in the last pipeline stage.
         if not get_pp_group().is_last_rank:
             return hidden_or_intermediate_states
@@ -572,6 +645,19 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPUWithSamplingMetadata]):
         if (self.observability_config is not None
                 and self.observability_config.collect_model_forward_time):
             model_forward_end_time = time.time()
+
+        # Sending KV cache in distributed KV cache transfer setting
+        # NOTE: the send operation is non-blocking
+        if self.need_send_kv(model_input, kv_caches):
+            get_kv_transfer_group().send_kv_caches_and_hidden_states(
+                # model_executable is used to know which layer the current
+                # worker is working on, so that we can send KV for only those
+                # layers.
+                model_executable,
+                model_input,
+                kv_caches,
+                hidden_or_intermediate_states,
+            )
 
         # Compute the logits.
         logits = self.model.compute_logits(hidden_or_intermediate_states,

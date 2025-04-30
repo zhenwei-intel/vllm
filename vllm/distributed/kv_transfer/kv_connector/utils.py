@@ -8,6 +8,7 @@ import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
+from typing import Any, Dict, List, Optional, Tuple, Type
 
 logger = init_logger(__name__)
 
@@ -77,6 +78,22 @@ class model_aware_kv_ops_helper:
                 layer.self_attn.attn._k_scale,
             )
         else:
+            if kv_cache.device.type == "xpu":
+                num_heads, head_size = self.get_model_args(model_executable)
+                key_cache, value_cache = self.split_kv_cache(
+                    kv_cache, num_heads, head_size)
+                from vllm._ipex_ops import ipex_ops
+                ipex_ops.reshape_and_cache(
+                    keys.to(key_cache.device),
+                    values.to(value_cache.device),
+                    key_cache,
+                    value_cache,
+                    slot_mapping[start_pos:end_pos],
+                    layer.self_attn.attn.kv_cache_dtype,
+                    layer.self_attn.attn._k_scale,
+                    layer.self_attn.attn._v_scale,
+                    )
+                return
             key_cache, value_cache = kv_cache[0], kv_cache[1]
             ops.reshape_and_cache_flash(
                 keys.to(key_cache.device),
@@ -88,3 +105,19 @@ class model_aware_kv_ops_helper:
                 layer.self_attn.attn._k_scale,
                 layer.self_attn.attn._v_scale,
             )
+
+    def split_kv_cache(
+        self,
+        kv_cache: torch.Tensor,
+        num_kv_heads: int,
+        head_size: int,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        x = 1
+        num_blocks = kv_cache.shape[1]
+
+        key_cache = kv_cache[0]
+        key_cache = key_cache.view(num_blocks, num_kv_heads, head_size // x,
+                                   -1, x)
+        value_cache = kv_cache[1]
+        value_cache = value_cache.view(num_blocks, num_kv_heads, head_size, -1)
+        return key_cache, value_cache
