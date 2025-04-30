@@ -20,6 +20,7 @@ from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.worker import Worker
 from vllm.worker.worker_base import LoRANotSupportedWorkerBase, WorkerBase
 from vllm.worker.xpu_model_runner import XPUModelRunner
+from vllm.distributed.kv_transfer import ensure_kv_transfer_initialized
 
 logger = init_logger(__name__)
 
@@ -43,6 +44,7 @@ class XPUWorker(LoRANotSupportedWorkerBase, Worker):
     ) -> None:
         WorkerBase.__init__(self, vllm_config=vllm_config)
         device_config = self.device_config
+        self.vllm_config = vllm_config
         parallel_config = self.parallel_config
         assert device_config.device_type == "xpu"
         assert current_platform.is_xpu()
@@ -183,3 +185,5 @@ class XPUWorker(LoRANotSupportedWorkerBase, Worker):
             # Add pp group init to avoid
             # p2p communication as the first call
             get_pp_group().all_reduce(torch.zeros(1).xpu())
+
+        ensure_kv_transfer_initialized(self.vllm_config)
