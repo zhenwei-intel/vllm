@@ -108,7 +108,7 @@ class MooncakeStoreConnector(KVConnectorBase):
             self.kv_store.put(hidden_key,
                               hidden_or_intermediate_states[start_pos:end_pos])
 
-        logger.debug("[rank%d]: KV send DONE.", torch.distributed.get_rank())
+        logger.log("[rank%d]: KV send DONE.", torch.distributed.get_rank())
 
     def recv_kv_caches_and_hidden_states(
         self, model_executable: torch.nn.Module,
