@@ -612,6 +612,8 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPUWithSamplingMetadata]):
         # we can skip prefilling on tokens that successfully received KV caches
         # NOTE: The receive operation is blocking
         bypass_model_exec = False
+        model_executable = self.model
+
         if self.need_recv_kv(model_input, kv_caches):
             hidden_or_intermediate_states, bypass_model_exec, model_input = \
                 get_kv_transfer_group().recv_kv_caches_and_hidden_states(
@@ -623,7 +625,6 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPUWithSamplingMetadata]):
                     kv_caches=kv_caches
                 )
 
-        model_executable = self.model
         if (self.observability_config is not None
                 and self.observability_config.collect_model_forward_time):
             model_forward_start_time = time.time()

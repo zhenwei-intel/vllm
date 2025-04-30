@@ -95,6 +95,7 @@ class XPUPlatform(Platform):
         if parallel_config.worker_cls == "auto":
             parallel_config.worker_cls = "vllm.worker.xpu_worker.XPUWorker"
 
+        # TODO: why must ray here?
         if parallel_config.distributed_executor_backend is None:
             parallel_config.distributed_executor_backend = "ray"
         elif parallel_config.distributed_executor_backend == "mp":
@@ -111,7 +112,7 @@ class XPUPlatform(Platform):
                 "%s is not supported on XPU, fallback to ray distributed"
                 " executor backend.",
                 parallel_config.distributed_executor_backend)
-            parallel_config.distributed_executor_backend = "ray"
+            # parallel_config.distributed_executor_backend = "ray"
 
     @classmethod
     def is_pin_memory_available(cls):
