@@ -2,6 +2,7 @@
 import bisect
 import gc
 import time
+import copy
 from typing import TYPE_CHECKING, Optional, cast
 from unittest.mock import patch
 
@@ -18,7 +19,10 @@ from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.layer import Attention
 from vllm.compilation.wrapper import TorchCompileWrapperWithCustomDispatcher
 from vllm.config import VllmConfig, get_layers_from_vllm_config
-from vllm.forward_context import set_forward_context
+from vllm.distributed.kv_transfer import (get_kv_transfer_group,
+                                          has_kv_transfer_group)
+from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
+from vllm.forward_context import set_forward_context, get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -770,8 +774,11 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         # Update cached state
         self._update_states(scheduler_output)
         if not scheduler_output.total_num_scheduled_tokens:
-            # Return empty ModelRunnerOutput if there's no work to do.
-            return EMPTY_MODEL_RUNNER_OUTPUT
+            if not has_kv_transfer_group():
+                # Return empty ModelRunnerOutput if there's no work to do.
+                return EMPTY_MODEL_RUNNER_OUTPUT
+
+            return self.kv_connector_no_forward(scheduler_output)
 
         if self.is_multimodal_model:
             # Run the multimodal encoder if any.
@@ -792,11 +799,17 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                 attn_metadata,
                 self.vllm_config,
                 num_tokens=scheduler_output.total_num_scheduled_tokens):
+            self.maybe_setup_kv_connector(scheduler_output)
+
             hidden_states = self.model(
                 input_ids=input_ids,
                 positions=self.position_ids,
                 inputs_embeds=inputs_embeds,
             )
+            self.maybe_wait_for_kv_save()
+            finished_sending, finished_recving = (
+                self.get_finished_kv_transfers(scheduler_output))
+
         hidden_states = self.select_hidden_states(hidden_states,
                                                   logits_indices)
         logits = self.compute_logits(hidden_states)
@@ -893,6 +906,8 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             spec_token_ids=None,
             logprobs=logprobs_lists,
             prompt_logprobs_dict=prompt_logprobs_dict,
+            finished_sending=finished_sending,
+            finished_recving=finished_recving,
         )
 
         # Check there are no new graphs compiled - all the graphs should be
@@ -900,6 +915,52 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         self._verify_num_xla_graphs("execute_model")
 
         return model_runner_output
+
+    def kv_connector_no_forward(
+            self, scheduler_output: "SchedulerOutput") -> ModelRunnerOutput:
+        # KV send/recv even if no work to do.
+        with set_forward_context(None, self.vllm_config):
+            self.maybe_setup_kv_connector(scheduler_output)
+            finished_sending, finished_recving = (
+                self.get_finished_kv_transfers(scheduler_output))
+
+        if not finished_sending and not finished_recving:
+            return EMPTY_MODEL_RUNNER_OUTPUT
+
+        output = copy.copy(EMPTY_MODEL_RUNNER_OUTPUT)
+        output.finished_sending = finished_sending
+        output.finished_recving = finished_recving
+        return output
+
+    @staticmethod
+    def maybe_setup_kv_connector(scheduler_output: "SchedulerOutput"):
+        # Update KVConnector with the KVConnector metadata forward().
+        if has_kv_transfer_group():
+            kv_connector = get_kv_transfer_group()
+            assert isinstance(kv_connector, KVConnectorBase_V1)
+            assert scheduler_output.kv_connector_metadata is not None
+            kv_connector.bind_connector_metadata(
+                scheduler_output.kv_connector_metadata)
+
+            # Background KV cache transfers happen here.
+            # These transfers are designed to be async and the requests
+            # involved may be disjoint from the running requests.
+            # Do this here to save a collective_rpc.
+            kv_connector.start_load_kv(get_forward_context())
+
+    @staticmethod
+    def maybe_wait_for_kv_save() -> None:
+        if has_kv_transfer_group():
+            get_kv_transfer_group().wait_for_save()
+
+    @staticmethod
+    def get_finished_kv_transfers(
+        scheduler_output: "SchedulerOutput",
+    ) -> tuple[Optional[set[str]], Optional[set[str]]]:
+        if has_kv_transfer_group():
+            return get_kv_transfer_group().get_finished(
+                scheduler_output.finished_req_ids)
+        return None, None
 
     def load_model(self) -> None:
         self.device = self.device_config.device
@@ -1290,6 +1351,9 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             kv_caches,
             self.vllm_config.compilation_config.static_forward_context,
             self.kv_caches)
+
+        if has_kv_transfer_group():
+            get_kv_transfer_group().register_kv_caches(kv_caches)
 
     def reset_dynamo_cache(self):
         if self.is_multimodal_model:
