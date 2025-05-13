@@ -293,10 +293,17 @@ class NixlConnectorScheduler:
         if request.kv_transfer_params.do_remote_decode:
             # TODO(jcgu): check correctness
             # self._reqs_need_send[request.request_id] = (request, blocks.get_unhashed_block_ids())
-            self._reqs_need_send[request.request_id] = (request, blocks.get_block_ids())
-            # TODO(jcgu): when to update request status
-            # request.do_remote_decode = False
-            logger.info(f"---jcgu: do_remote_decode, id:{request.request_id}, block_ids: {blocks.get_block_ids()}")
+            block_ids = blocks.get_block_ids()
+            all_full = request.num_tokens % self.block_size == 0
+            full_block_ids = (block_ids if all_full else block_ids[:-1])
+
+            if full_block_ids:
+                self._reqs_need_send[request.request_id] = (request, full_block_ids)
+                # TODO(jcgu): when to update request status
+
+            request.kv_transfer_params.do_remote_decode = False
+            logger.info(f"---jcgu: do_remote_decode, id:{request.request_id}, block_ids: {blocks.get_block_ids()}, full_block_ids: {full_block_ids}")
+
         elif request.kv_transfer_params.do_remote_prefill:
             # NOTE(rob): if prompt < block_size, no remote blocks
             # since the remote only sends fully computed blocks, so
@@ -312,6 +319,8 @@ class NixlConnectorScheduler:
             # Only trigger 1 KV transfer per request.
             request.kv_transfer_params.do_remote_prefill = False
             logger.info(f"---jcgu: do_remote_prefill, id:{request.request_id}, block_ids: {blocks.get_unhashed_block_ids()}, remote_block_ids: {request.kv_transfer_params.remote_block_ids}")
+
+
 
     def build_connector_meta(
         self,
@@ -333,7 +342,7 @@ class NixlConnectorScheduler:
                 local_block_ids=block_ids,
                 kv_transfer_params=_kv_transfer_params,
             )
-            logger.info(f"---jcgu: do_remote_prefill, id:{req_id}, block_ids: {block_ids}") 
+            logger.info(f"---jcgu2: do_remote_prefill, id:{req_id}, block_ids: {block_ids}, remote_block_ids: {_kv_transfer_params.remote_block_ids}") 
 
         for req_id, (req, block_ids) in self._reqs_need_send.items():
             assert req.kv_transfer_params is not None
@@ -884,6 +893,7 @@ class NixlConnectorWorker:
                 "Num local_block_ids: %s. Num remote_block_ids: %s. ", req_id,
                 meta.remote_engine_id, len(meta.local_block_ids),
                 len(meta.remote_block_ids))
+            logger.info(f"---jcgu3: request:{req_id}, local_blocks: {meta.local_block_ids}, remote_blocks:{meta.remote_block_ids}")
             self._read_blocks(
                 request_id=req_id,
                 dst_engine_id=meta.remote_engine_id,
@@ -927,7 +937,7 @@ class NixlConnectorWorker:
 
         # Partial prefix cache hit: just read uncomputed blocks.
         num_remote_blocks = len(remote_block_ids)
-        assert num_local_blocks <= num_remote_blocks
+        assert num_local_blocks <= num_remote_blocks, f"--jcgu-error: {local_block_ids}, {remote_block_ids}"
         if num_local_blocks < num_remote_blocks:
             remote_block_ids = remote_block_ids[-num_local_blocks:]
 
