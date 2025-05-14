@@ -4,6 +4,7 @@ import math
 import threading
 import time
 import uuid
+import enum
 import os
 import copy
 from collections import defaultdict
@@ -39,8 +40,6 @@ if TYPE_CHECKING:
 
 GET_META_MSG = b"get_meta_msg"
 
-NIXL_CONNECTOR_XPU_SUPPORT_LIST = ('tpu',)
-
 logger = init_logger(__name__)
 
 # Lazy import nixl_wrapper to avoid loading nixl_bindings if nixl is not used
@@ -51,6 +50,14 @@ except ImportError:
     logger.warning("NIXL is not available")
     NixlWrapper = None
 
+
+class _SUPPORTED_XPU(enum.Enum):
+    """nixl_connector supports the following xPUs"""  
+    TPU = "tpu"
+
+    @classmethod
+    def support(cls, value):
+        return value in cls._value2member_map_
 
 @dataclass
 class NixlKVTransferParams(KVTransferParams):
@@ -212,10 +219,7 @@ class NixlConnector(KVConnectorBase_V1):
                      finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
         """Get the finished recving and sending requests."""
         assert self.connector_worker is not None
-        done_sending, done_recving = self.connector_worker.get_finished()
-        if done_recving is not None and len(done_recving) > 0:
-            logger.info(f" done recving: {done_recving}")
-        return done_sending, done_recving
+        return self.connector_worker.get_finished()
 
     def start_load_kv(self, forward_context: "ForwardContext",
                       **kwargs) -> None:
@@ -425,10 +429,10 @@ class NixlConnectorWorker:
         # cpu kv buffer for xfer
         # used when xPU memory can not be registered under nixl
         self.host_xfer_buffers: dict[str, torch.Tensor] = {}
-        self.use_host_buffer = True if self.kv_buffer_device in NIXL_CONNECTOR_XPU_SUPPORT_LIST else False
+        self.use_host_buffer = True if _SUPPORTED_XPU.support(self.kv_buffer_device) else False
         if self.kv_buffer_device == "cuda":
             self.nixl_memory_type = "VRAM"
-        elif self.kv_buffer_device in NIXL_CONNECTOR_XPU_SUPPORT_LIST:
+        elif _SUPPORTED_XPU.support(self.kv_buffer_device):
             self.nixl_memory_type = "DRAM"
         else:
             raise ValueError(f"{self.kv_buffer_device} is not support by NIXL_CONNECTOR.")
