@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """A TPU worker class."""
 import os
-from typing import Optional
+from typing import Optional, Union, Tuple
 
 import torch
 import torch.distributed
@@ -272,3 +272,38 @@ def init_tpu_worker_distributed_environment(
     ensure_model_parallel_initialized(parallel_config.tensor_parallel_size,
                                       parallel_config.pipeline_parallel_size)
     ensure_kv_transfer_initialized(vllm_config)
+
+def make_src_and_dst_indices(
+    src_block_ids: list[int],
+    dst_block_ids: list[int],
+    src_device: Union[torch.device, str],
+    dst_device: Union[torch.device, str],
+) -> Optional[Tuple[torch.Tensor, torch.Tensor]]:
+    src_indices = torch.tensor(src_block_ids,
+                               device=src_device,
+                               dtype=torch.int64)
+    dst_indices = torch.tensor(dst_block_ids,
+                               device=dst_device,
+                               dtype=torch.int64)
+    return src_indices, dst_indices
+
+@torch.compile(backend="openxla")
+def insert_blocks_to_tpu(
+    src_cache: torch.Tensor,
+    tpu_block_indices: torch.Tensor,
+    tpu_cache: torch.Tensor,
+) -> None:
+    torch.ops.xla.dynamo_set_buffer_donor_(tpu_cache, True)
+    tpu_cache[tpu_block_indices] = src_cache
+
+@torch.compile(backend="openxla")
+def swap_out_tpu_blocks(
+    tpu_cache: torch.Tensor,
+    cpu_cache: torch.Tensor,
+    tpu_block_indices: torch.Tensor,
+    cpu_block_indices: torch.Tensor,
+) -> None:
+    """ tpu blocks to cpu blocks"""
+    torch.ops.xla.dynamo_set_buffer_donor_(tpu_cache, True)
+    _tpu_cache = tpu_cache[tpu_block_indices]
+    cpu_cache[cpu_block_indices] = _tpu_cache.cpu()
