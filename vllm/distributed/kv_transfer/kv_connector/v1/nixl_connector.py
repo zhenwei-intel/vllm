@@ -27,10 +27,12 @@ from vllm.logger import init_logger
 from vllm.utils import round_down
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.request import RequestStatus
-from vllm.v1.worker.tpu_worker import (
-    make_src_and_dst_indices, insert_blocks_to_tpu,
-    swap_out_tpu_blocks)
+
 from vllm.platforms import current_platform
+if current_platform.device_type == 'tpu':
+    from vllm.v1.worker.tpu_worker import (
+        make_src_and_dst_indices, insert_blocks_to_tpu,
+        swap_out_tpu_blocks)
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
