@@ -26,8 +26,6 @@ from vllm.v1.utils import bind_kv_cache, report_usage_stats
 from vllm.v1.worker.tpu_model_runner import TPUModelRunner
 from vllm.distributed.kv_transfer import ensure_kv_transfer_initialized
 
-
-
 logger = init_logger(__name__)
 
 

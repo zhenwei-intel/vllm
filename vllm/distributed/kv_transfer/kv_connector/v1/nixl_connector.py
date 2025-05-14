@@ -26,7 +26,10 @@ from vllm.logger import init_logger
 from vllm.utils import round_down
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.request import RequestStatus
-from vllm.v1.worker.tpu_worker import make_src_and_dst_indices, insert_blocks_to_tpu, swap_out_tpu_blocks
+from vllm.v1.worker.tpu_worker import (
+    make_src_and_dst_indices, insert_blocks_to_tpu,
+    swap_out_tpu_blocks)
+from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
@@ -163,7 +166,7 @@ class NixlConnector(KVConnectorBase_V1):
             self.connector_worker: Optional[NixlConnectorWorker] = None
         elif role == KVConnectorRole.WORKER:
             self.connector_scheduler = None
-            self.connector_worker = NixlConnectorWorker(str(self.engine_id))
+            self.connector_worker = NixlConnectorWorker(vllm_config, str(self.engine_id))
 
     ############################################################
     # Scheduler Side Methods
@@ -294,15 +297,12 @@ class NixlConnectorScheduler:
         assert isinstance(request.kv_transfer_params, NixlKVTransferParams)
         if request.kv_transfer_params.do_remote_decode:
             # TODO(jcgu): check correctness
-            # self._reqs_need_send[request.request_id] = (request, blocks.get_unhashed_block_ids())
             block_ids = blocks.get_block_ids()
             all_full = request.num_tokens % self.block_size == 0
             full_block_ids = (block_ids if all_full else block_ids[:-1])
 
             if full_block_ids:
                 self._reqs_need_send[request.request_id] = (request, full_block_ids)
-                # TODO(jcgu): when to update request status
-
             request.kv_transfer_params.do_remote_decode = False
             logger.info(f"---jcgu: do_remote_decode, id:{request.request_id}, block_ids: {blocks.get_block_ids()}, full_block_ids: {full_block_ids}")
 
@@ -334,7 +334,7 @@ class NixlConnectorScheduler:
         for req_id, (req, block_ids) in self._reqs_need_recv.items():
             assert req.kv_transfer_params is not None
             assert isinstance(req.kv_transfer_params, NixlKVTransferParams)
-            assert req.kv_transfer_params.do_remote_decode == False
+            assert req.kv_transfer_params.do_remote_prefill
 
             _kv_transfer_params = copy.deepcopy(req.kv_transfer_params)
             _kv_transfer_params.do_remote_prefill = True
@@ -349,7 +349,7 @@ class NixlConnectorScheduler:
         for req_id, (req, block_ids) in self._reqs_need_send.items():
             assert req.kv_transfer_params is not None
             assert isinstance(req.kv_transfer_params, NixlKVTransferParams)
-            assert req.kv_transfer_params.do_remote_prefill == False
+            assert req.kv_transfer_params.do_remote_decode
 
             _kv_transfer_params = copy.deepcopy(req.kv_transfer_params)
             _kv_transfer_params.do_remote_decode = True
@@ -428,7 +428,7 @@ class NixlConnectorWorker:
 
         # KV Caches and nixl tracking data.
         self.kv_buffer_device: str = vllm_config.kv_transfer_config.kv_buffer_device.strip().lower()
-        assert self.kv_buffer_device == envs.VLLM_TARGET_DEVICE
+        assert self.kv_buffer_device == current_platform.device_type, f"--{self.kv_buffer_device}, {current_platform.device_type}"
         self.device_kv_caches: dict[str, torch.Tensor] = {}
         self.device = None
 
@@ -587,7 +587,7 @@ class NixlConnectorWorker:
         kv_elem_size = first_kv_cache.element_size()
 
         if self.use_host_buffer:
-            self.initialize_transfer_buffer(kv_caches=kv_caches)
+            self.initialize_host_xfer_buffer(kv_caches=kv_caches)
             assert len(self.host_xfer_buffers) == len(kv_caches), f"host_buffer: {len(self.host_xfer_buffers)}, kv_caches: {len(kv_caches)}"
             xfer_buffers = self.host_xfer_buffers
         else:
