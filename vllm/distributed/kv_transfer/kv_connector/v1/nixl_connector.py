@@ -323,7 +323,6 @@ class NixlConnectorScheduler:
             logger.info(f"---jcgu: do_remote_prefill, id:{request.request_id}, block_ids: {blocks.get_unhashed_block_ids()}, remote_block_ids: {request.kv_transfer_params.remote_block_ids}")
 
 
-
     def build_connector_meta(
         self,
         scheduler_output: SchedulerOutput,
@@ -334,7 +333,6 @@ class NixlConnectorScheduler:
         for req_id, (req, block_ids) in self._reqs_need_recv.items():
             assert req.kv_transfer_params is not None
             assert isinstance(req.kv_transfer_params, NixlKVTransferParams)
-            assert req.kv_transfer_params.do_remote_prefill
 
             _kv_transfer_params = copy.deepcopy(req.kv_transfer_params)
             _kv_transfer_params.do_remote_prefill = True
@@ -349,7 +347,6 @@ class NixlConnectorScheduler:
         for req_id, (req, block_ids) in self._reqs_need_send.items():
             assert req.kv_transfer_params is not None
             assert isinstance(req.kv_transfer_params, NixlKVTransferParams)
-            assert req.kv_transfer_params.do_remote_decode
 
             _kv_transfer_params = copy.deepcopy(req.kv_transfer_params)
             _kv_transfer_params.do_remote_decode = True
@@ -564,8 +561,8 @@ class NixlConnectorWorker:
             device_tensor = self.device_kv_caches[layer_name]
             swap_out_tpu_blocks(tpu_cache=device_tensor,
                           cpu_cache=host_tensor,
-                          tpu_indices=device_indices,
-                          cpu_indices=host_indices)
+                          tpu_block_indices=device_indices,
+                          cpu_block_indices=host_indices)
 
     def initialize_host_xfer_buffer(self, kv_caches: dict[str, torch.Tensor]) -> None:
         """Initialize transfer buffer in CPU mem for xPUs (e.g., tpu)"""
