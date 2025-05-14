@@ -3,7 +3,6 @@
 import json
 import sys
 import time
-import sys
 from collections.abc import (AsyncGenerator, Iterable, Iterator, Mapping,
                              Sequence)
 from concurrent.futures.thread import ThreadPoolExecutor
