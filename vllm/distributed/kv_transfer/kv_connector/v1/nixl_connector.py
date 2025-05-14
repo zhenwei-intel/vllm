@@ -296,7 +296,6 @@ class NixlConnectorScheduler:
 
         assert isinstance(request.kv_transfer_params, NixlKVTransferParams)
         if request.kv_transfer_params.do_remote_decode:
-            # TODO(jcgu): check correctness
             block_ids = blocks.get_block_ids()
             all_full = request.num_tokens % self.block_size == 0
             full_block_ids = (block_ids if all_full else block_ids[:-1])
@@ -304,7 +303,6 @@ class NixlConnectorScheduler:
             if full_block_ids:
                 self._reqs_need_send[request.request_id] = (request, full_block_ids)
             request.kv_transfer_params.do_remote_decode = False
-            logger.info(f"---jcgu: do_remote_decode, id:{request.request_id}, block_ids: {blocks.get_block_ids()}, full_block_ids: {full_block_ids}")
 
         elif request.kv_transfer_params.do_remote_prefill:
             # NOTE(rob): if prompt < block_size, no remote blocks
@@ -320,8 +318,6 @@ class NixlConnectorScheduler:
 
             # Only trigger 1 KV transfer per request.
             request.kv_transfer_params.do_remote_prefill = False
-            logger.info(f"---jcgu: do_remote_prefill, id:{request.request_id}, block_ids: {blocks.get_unhashed_block_ids()}, remote_block_ids: {request.kv_transfer_params.remote_block_ids}")
-
 
     def build_connector_meta(
         self,
@@ -342,7 +338,6 @@ class NixlConnectorScheduler:
                 local_block_ids=block_ids,
                 kv_transfer_params=_kv_transfer_params,
             )
-            logger.info(f"---jcgu2: do_remote_prefill, id:{req_id}, block_ids: {block_ids}, remote_block_ids: {_kv_transfer_params.remote_block_ids}") 
 
         for req_id, (req, block_ids) in self._reqs_need_send.items():
             assert req.kv_transfer_params is not None
@@ -356,7 +351,6 @@ class NixlConnectorScheduler:
                 local_block_ids=block_ids,
                 kv_transfer_params=_kv_transfer_params,
             )
-            logger.info(f"---jcgu: do_remote_decode, id:{req_id}, block_ids: {block_ids}") 
 
         # Clear the list once workers start the transfers
         self._reqs_need_recv.clear()
@@ -389,7 +383,6 @@ class NixlConnectorScheduler:
         # If prompt < block_size, no xfer so free blocks immediately.
         delay_free_blocks = len(computed_block_ids) > 0
 
-        logger.info(f"---jcgu: finished_request: {delay_free_blocks}, id:{request.request_id}, do_remote_prefill, computed_block_ids:{computed_block_ids}, remote_host: {envs.VLLM_NIXL_SIDE_CHANNEL_HOST}, port: {envs.VLLM_NIXL_SIDE_CHANNEL_PORT}")
         return delay_free_blocks, NixlKVTransferParams(
             do_remote_prefill=True,
             do_remote_decode=False,
@@ -573,9 +566,7 @@ class NixlConnectorWorker:
             xfer_buffers[layer_name] = torch.zeros(kv_shape,
                                                    dtype=kv_dtype,
                                                    device="cpu")
-            logger.info(f"-----jcgu kv_cache shape: {kv_shape}")
         self.host_xfer_buffers = xfer_buffers
-        logger.info("---jcgu finished create host buffer")
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data in nixl."""
@@ -617,8 +608,8 @@ class NixlConnectorWorker:
         # hybrid attn, etc
         self.block_len = kv_elem_size * math.prod(block_shape)
 
-        logger.debug("Registering KV_Caches. use_mla: %s,  use_host_buffer: %s, shape %s", use_mla, self.use_host_buffer,
-                     first_kv_cache.shape)
+        logger.debug("Registering KV_Caches. use_mla: %s, kv_buffer_device: %s, use_host_buffer: %s, shape %s",
+                     use_mla, self.kv_buffer_device, self.use_host_buffer, first_kv_cache.shape)
         logger.debug("num_blocks: %s, block_shape: %s", self.num_blocks,
                      block_shape)
         logger.debug("Per layer kv cache size: %s", first_kv_cache.shape)
@@ -721,7 +712,8 @@ class NixlConnectorWorker:
             local_block_ids = meta.local_block_ids
             self.h2d_copy_blocks(block_ids=local_block_ids)
             logger.debug(
-                f"sync recved kv for request (do_remote_prefill) {req_id} to device xfer buffer. local_block_ids: {meta.local_block_ids}" 
+                f"sync recved kv for request:{req_id} to device xfer buffer,"
+                f" local_block_ids: {meta.local_block_ids}" 
             )
         return
 
@@ -862,7 +854,6 @@ class NixlConnectorWorker:
                 "Num local_block_ids: %s. Num remote_block_ids: %s. ", req_id,
                 meta.remote_engine_id, len(meta.local_block_ids),
                 len(meta.remote_block_ids))
-            logger.info(f"---jcgu3: request:{req_id}, local_blocks: {meta.local_block_ids}, remote_blocks:{meta.remote_block_ids}")
             self._read_blocks(
                 request_id=req_id,
                 dst_engine_id=meta.remote_engine_id,
@@ -906,7 +897,7 @@ class NixlConnectorWorker:
 
         # Partial prefix cache hit: just read uncomputed blocks.
         num_remote_blocks = len(remote_block_ids)
-        assert num_local_blocks <= num_remote_blocks, f"--jcgu-error: {local_block_ids}, {remote_block_ids}"
+        assert num_local_blocks <= num_remote_blocks
         if num_local_blocks < num_remote_blocks:
             remote_block_ids = remote_block_ids[-num_local_blocks:]
 
