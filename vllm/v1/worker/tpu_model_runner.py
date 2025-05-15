@@ -3,7 +3,7 @@ import bisect
 import gc
 import time
 import copy
-from typing import TYPE_CHECKING, Optional, cast
+from typing import TYPE_CHECKING, Optional, cast, Union, Tuple
 from unittest.mock import patch
 
 import numpy as np
@@ -1354,6 +1354,7 @@ class TPUModelRunner(LoRAModelRunnerMixin):
 
         if has_kv_transfer_group():
             get_kv_transfer_group().register_kv_caches(kv_caches)
+            get_kv_transfer_group().set_host_xfer_buffer_ops(d2h_copy_blocks, h2d_copy_blocks)
 
     def reset_dynamo_cache(self):
         if self.is_multimodal_model:
@@ -1563,3 +1564,82 @@ def _get_padded_token_len(paddings: list[int], x: int) -> int:
     index = bisect.bisect_left(paddings, x)
     assert index < len(paddings)
     return paddings[index]
+
+
+def _make_src_and_dst_indices(
+    src_block_ids: list[int],
+    dst_block_ids: list[int],
+    src_device: Union[torch.device, str],
+    dst_device: Union[torch.device, str],
+) -> Optional[Tuple[torch.Tensor, torch.Tensor]]:
+    src_indices = torch.tensor(src_block_ids,
+                               device=src_device,
+                               dtype=torch.int64)
+    dst_indices = torch.tensor(dst_block_ids,
+                               device=dst_device,
+                               dtype=torch.int64)
+    return src_indices, dst_indices
+
+@torch.compile(backend="openxla")
+def _insert_blocks_to_tpu(
+    src_cache: torch.Tensor,
+    tpu_cache: torch.Tensor,
+    tpu_block_indices: torch.Tensor,
+) -> None:
+    torch.ops.xla.dynamo_set_buffer_donor_(tpu_cache, True)
+    tpu_cache[tpu_block_indices] = src_cache
+
+@torch.compile(backend="openxla")
+def _swap_out_tpu_blocks(
+    tpu_cache: torch.Tensor,
+    cpu_cache: torch.Tensor,
+    tpu_block_indices: torch.Tensor,
+    cpu_block_indices: torch.Tensor,
+) -> None:
+    """ tpu blocks to cpu blocks"""
+    torch.ops.xla.dynamo_set_buffer_donor_(tpu_cache, True)
+    _tpu_cache = tpu_cache[tpu_block_indices]
+    cpu_cache[cpu_block_indices] = _tpu_cache.cpu()
+
+
+def h2d_copy_blocks(
+    cpu_kv_caches: dict[torch.Tensor],
+    tpu_kv_caches: dict[torch.Tensor],
+    cpu_block_ids: list[int],
+    tpu_block_ids: list[int],
+    tpu_device: str,
+) -> None:
+    """Copy kv blocks from host xfer buffer to device."""
+    if not cpu_block_ids or not tpu_block_ids or len(cpu_block_ids) != len(tpu_block_ids):
+        return
+    host_indices, device_indices = _make_src_and_dst_indices(src_block_ids=cpu_block_ids,
+                                                    dst_block_ids=tpu_block_ids,
+                                                    src_device="cpu",
+                                                    dst_device=tpu_device)
+    for layer_name in cpu_kv_caches:
+        host_tensor = cpu_kv_caches[layer_name]
+        device_tensor = tpu_kv_caches[layer_name]
+        sliced_device_tensor = host_tensor[host_indices].to(tpu_device)
+        _insert_blocks_to_tpu(sliced_device_tensor, device_indices, device_tensor)
+
+def d2h_copy_blocks(
+    cpu_kv_caches: dict[torch.Tensor],
+    tpu_kv_caches: dict[torch.Tensor],
+    cpu_block_ids: list[int],
+    tpu_block_ids: list[int],
+    tpu_device: str,
+) -> None:
+    """Copy kv blocks from device to host xfer buffer."""
+    if not cpu_block_ids or not tpu_block_ids or len(cpu_block_ids) != len(tpu_block_ids):
+        return
+    device_indices, host_indices = _make_src_and_dst_indices(src_block_ids=tpu_block_ids,
+                                                    dst_block_ids=cpu_block_ids,
+                                                    src_device=tpu_device,
+                                                    dst_device="cpu")
+    for layer_name in cpu_kv_caches:
+        host_tensor = cpu_kv_caches[layer_name]
+        device_tensor = tpu_kv_caches[layer_name]
+        _swap_out_tpu_blocks(tpu_cache=device_tensor,
+                            cpu_cache=host_tensor,
+                            tpu_block_indices=device_indices,
+                            cpu_block_indices=host_indices)

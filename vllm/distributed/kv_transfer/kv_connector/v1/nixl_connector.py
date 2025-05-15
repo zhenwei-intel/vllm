@@ -29,10 +29,6 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.request import RequestStatus
 
 from vllm.platforms import current_platform
-if current_platform.device_type == 'tpu':
-    from vllm.v1.worker.tpu_worker import (
-        make_src_and_dst_indices, insert_blocks_to_tpu,
-        swap_out_tpu_blocks)
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
@@ -53,8 +49,8 @@ except ImportError:
     NixlWrapper = None
 
 
-class _SUPPORTED_XPU(enum.Enum):
-    """nixl_connector supports the following xPUs"""  
+class _NIXL_SUPPORTED_XPU_TYPE(enum.Enum):
+    """nixl_connector supports the following xPUs (GPU not included)"""  
     TPU = "tpu"
 
     @classmethod
@@ -217,6 +213,10 @@ class NixlConnector(KVConnectorBase_V1):
         assert self.connector_worker is not None
         self.connector_worker.register_kv_caches(kv_caches)
 
+    def set_host_xfer_buffer_ops(self, d2h_copy_blocks: Any, h2d_copy_blocks: Any):
+        assert self.connector_worker is not None
+        self.connector_worker.set_host_xfer_buffer_ops(d2h_copy_blocks, h2d_copy_blocks)
+
     def get_finished(self,
                      finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
         """Get the finished recving and sending requests."""
@@ -239,7 +239,6 @@ class NixlConnector(KVConnectorBase_V1):
         pass
 
     def wait_for_save(self):
-        """NixlConnector does not save explicitly."""
         assert self.connector_worker is not None
         assert isinstance(self._connector_metadata, NixlConnectorMetadata)
         self.connector_worker.save_kv_to_host(self._connector_metadata)
@@ -431,13 +430,17 @@ class NixlConnectorWorker:
         # cpu kv buffer for xfer
         # used when xPU memory can not be registered under nixl
         self.host_xfer_buffers: dict[str, torch.Tensor] = {}
-        self.use_host_buffer = True if _SUPPORTED_XPU.support(self.kv_buffer_device) else False
+        self.use_host_buffer = True if _NIXL_SUPPORTED_XPU_TYPE.support(self.kv_buffer_device) else False
         if self.kv_buffer_device == "cuda":
             self.nixl_memory_type = "VRAM"
-        elif _SUPPORTED_XPU.support(self.kv_buffer_device):
+        elif _NIXL_SUPPORTED_XPU_TYPE.support(self.kv_buffer_device):
             self.nixl_memory_type = "DRAM"
         else:
             raise ValueError(f"{self.kv_buffer_device} is not support by NIXL_CONNECTOR.")
+
+        # Note: host xfer buffer ops when use_host_buffer is True
+        self.d2h_copy_blocks: Optional[Any] = None
+        self.h2d_copy_blocks: Optional[Any] = None
 
         # Map of engine_id -> kv_caches_base_addr
         self.kv_caches_base_addr: dict[str, list[int]] = {}
@@ -533,36 +536,6 @@ class NixlConnectorWorker:
             logger.debug("NIXL handshake: add agent took: %s",
                          setup_agent_time - got_metadata_time)
 
-    def h2d_copy_blocks(self, block_ids):
-        """Copy kv blocks from host xfer buffer to device."""
-        # NOTE: only supports TPU
-        assert self.kv_buffer_device == 'tpu'
-        host_indices, device_indices = make_src_and_dst_indices(src_block_ids=block_ids,
-                                                        dst_block_ids=block_ids,
-                                                        src_device="cpu",
-                                                        dst_device=self.device)
-        for layer_name in self.host_xfer_buffers:
-            host_tensor = self.host_xfer_buffers[layer_name]
-            device_tensor = self.device_kv_caches[layer_name]
-            sliced_device_tensor = host_tensor[host_indices].to(self.device)
-            insert_blocks_to_tpu(sliced_device_tensor, device_indices, device_tensor)
-
-    def d2h_copy_blocks(self, block_ids):
-        """Copy kv blocks from device to host xfer buffer."""
-        # NOTE: only supports TPU
-        assert self.kv_buffer_device == 'tpu'
-        device_indices, host_indices = make_src_and_dst_indices(src_block_ids=block_ids,
-                                                        dst_block_ids=block_ids,
-                                                        src_device=self.device,
-                                                        dst_device="cpu")
-        for layer_name in self.host_xfer_buffers:
-            host_tensor = self.host_xfer_buffers[layer_name]
-            device_tensor = self.device_kv_caches[layer_name]
-            swap_out_tpu_blocks(tpu_cache=device_tensor,
-                          cpu_cache=host_tensor,
-                          tpu_block_indices=device_indices,
-                          cpu_block_indices=host_indices)
-
     def initialize_host_xfer_buffer(self, kv_caches: dict[str, torch.Tensor]) -> None:
         """Initialize transfer buffer in CPU mem for xPUs (e.g., tpu)"""
         xfer_buffers: dict[str, torch.Tensor] = {}
@@ -573,6 +546,11 @@ class NixlConnectorWorker:
                                                    dtype=kv_dtype,
                                                    device="cpu")
         self.host_xfer_buffers = xfer_buffers
+        
+    def set_host_xfer_buffer_ops(self, d2h_copy_blocks: Any, h2d_copy_blocks: Any):
+        assert self.use_host_buffer
+        self.d2h_copy_blocks = d2h_copy_blocks
+        self.h2d_copy_blocks = h2d_copy_blocks
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data in nixl."""
@@ -716,7 +694,11 @@ class NixlConnectorWorker:
             if not meta.do_remote_prefill:
                 return
             local_block_ids = meta.local_block_ids
-            self.h2d_copy_blocks(block_ids=local_block_ids)
+            self.h2d_copy_blocks(self.host_xfer_buffers,
+                                 self.device_kv_caches,
+                                 local_block_ids,
+                                 local_block_ids,
+                                 self.device)
             logger.debug(
                 f"sync recved kv for request:{req_id} to device xfer buffer,"
                 f" local_block_ids: {meta.local_block_ids}" 
@@ -724,7 +706,7 @@ class NixlConnectorWorker:
         return
 
     def save_kv_to_host(self, metadata: NixlConnectorMetadata):
-        if not self.use_host_buffer:
+        if not self.use_host_buffer and not self.d2h_copy_blocks:
             return
         for req_id, meta in metadata.requests.items():
             # local prefill requests only
@@ -734,7 +716,11 @@ class NixlConnectorWorker:
             logger.debug(
                 "save_load_kv for request (do_remote_decode) %s to host xfer buffer." 
                 "local_block_ids: %s. ", req_id, len(meta.local_block_ids))
-            self.d2h_copy_blocks(block_ids=meta.local_block_ids)
+            self.d2h_copy_blocks(self.host_xfer_buffers,
+                                 self.device_kv_caches,
+                                 meta.local_block_ids,
+                                 meta.local_block_ids,
+                                 self.device)
         return
 
     def get_finished(self) -> tuple[set[str], set[str]]:
@@ -759,7 +745,7 @@ class NixlConnectorWorker:
 
         for req_id in done_recving:
             assert req_id in self._recving_metadata, f"{req_id} not found in recving_metadata list"
-            if self.use_host_buffer:
+            if self.use_host_buffer and self.h2d_copy_blocks is not None:
                 self.sync_recved_kv_to_device(req_id) 
             self._recving_metadata.pop(req_id)
 
