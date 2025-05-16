@@ -308,7 +308,6 @@ class NixlConnectorScheduler:
 
             if full_block_ids:
                 self._reqs_need_send[request.request_id] = (request, full_block_ids)
-            request.kv_transfer_params.do_remote_decode = False
 
         elif request.kv_transfer_params.do_remote_prefill:
             # NOTE(rob): if prompt < block_size, no remote blocks
