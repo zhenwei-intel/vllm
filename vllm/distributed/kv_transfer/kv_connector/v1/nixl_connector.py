@@ -166,12 +166,13 @@ class NixlConnector(KVConnectorBase_V1):
         self.engine_id = vllm_config.kv_transfer_config.engine_id
 
         if role == KVConnectorRole.SCHEDULER:
-            self.connector_scheduler : Optional[NixlConnectorScheduler] = \
+            self.connector_scheduler: Optional[NixlConnectorScheduler] = \
                 NixlConnectorScheduler(vllm_config, str(self.engine_id))
             self.connector_worker: Optional[NixlConnectorWorker] = None
         elif role == KVConnectorRole.WORKER:
             self.connector_scheduler = None
-            self.connector_worker = NixlConnectorWorker(vllm_config, str(self.engine_id))
+            self.connector_worker = NixlConnectorWorker(vllm_config,
+                                                        str(self.engine_id))
 
     ############################################################
     # Scheduler Side Methods

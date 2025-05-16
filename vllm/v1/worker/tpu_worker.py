@@ -259,7 +259,6 @@ def init_tpu_worker_distributed_environment(
     # are invoked by `xm.all_reduce` and `xm.all_gather` which use their
     # own context.
     parallel_config = vllm_config.parallel_config
-    print(f"--- wold_size: {parallel_config.world_size}, rank: ={rank}, local_rank:{local_rank}")
     init_distributed_environment(
         world_size=parallel_config.world_size,
         rank=rank,
