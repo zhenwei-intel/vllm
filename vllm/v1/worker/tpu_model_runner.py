@@ -1575,7 +1575,8 @@ def h2d_copy_blocks(
         host_tensor = cpu_kv_caches[layer_name]
         device_tensor = tpu_kv_caches[layer_name]
         sliced_device_tensor = host_tensor[host_indices].to(tpu_device)
-        _insert_blocks_to_tpu(sliced_device_tensor, device_indices, device_tensor)
+        _insert_blocks_to_tpu(sliced_device_tensor, device_tensor, device_indices)
+
 
 def d2h_copy_blocks(
     cpu_kv_caches: dict[torch.Tensor],
