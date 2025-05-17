@@ -577,7 +577,7 @@ class NixlConnectorWorker:
                 kv_caches_base_addr.append(base_addr)
         self.kv_caches_base_addr[self.engine_id] = kv_caches_base_addr
         self.num_regions = len(caches_data)
-        self.num_layers = len(self.kv_caches.keys())
+        self.num_layers = len(xfer_buffers.keys())
 
         # TODO(mgoin): remove this once we have hybrid memory allocator
         # Optimization for models with local attention (Llama 4)
