@@ -271,3 +271,11 @@ def init_tpu_worker_distributed_environment(
                                       parallel_config.enable_expert_parallel)
 
     ensure_kv_transfer_initialized(vllm_config)
+
+
+try:
+    from tpu_commons.worker import TPUWorker as TPUCommonsWorker
+    TPUWorker = TPUCommonsWorker  # type: ignore
+except ImportError:
+    logger.info("tpu_commons not found, using vLLM's TPUWorker.")
+    pass
