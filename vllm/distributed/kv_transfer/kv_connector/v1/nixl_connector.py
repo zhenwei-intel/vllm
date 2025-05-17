@@ -253,7 +253,7 @@ class NixlConnectorScheduler:
             return
         if params.get("do_remote_decode"):
             # NOTE: only need to save / send full computed blocks
-            block_ids = blocks.get_block_ids()
+            block_ids = blocks.get_block_ids()[0]
             all_full = request.num_tokens % self.block_size == 0
             full_block_ids = (block_ids if all_full else block_ids[:-1])
             if full_block_ids:
@@ -287,16 +287,18 @@ class NixlConnectorScheduler:
         # Loop through scheduled reqs and convert to ReqMeta.
         for req_id, (req, block_ids) in self._reqs_need_recv.items():
             assert req.kv_transfer_params is not None
+            _kv_transfer_params = copy.deepcopy(req.kv_transfer_params)
+            _kv_transfer_params["do_remote_prefill"] = True
             meta.add_new_req(
                 request_id=req_id,
                 local_block_ids=block_ids,
-                kv_transfer_params=req.kv_transfer_params,
+                kv_transfer_params=_kv_transfer_params,
             )
 
         for req_id, (req, block_ids) in self._reqs_need_send.items():
             assert req.kv_transfer_params is not None
             _kv_transfer_params = copy.deepcopy(req.kv_transfer_params)
-            _kv_transfer_params.do_remote_decode = True
+            _kv_transfer_params["do_remote_decode"] = True
             meta.add_new_req(
                 request_id=req_id,
                 local_block_ids=block_ids,
@@ -662,7 +664,7 @@ class NixlConnectorWorker:
             # blocking
             logger.debug(
                 "save_load_kv for request (do_remote_decode) %s to host xfer buffer." 
-                "local_block_ids: %s. ", req_id, len(meta.local_block_ids))
+                "local_block_ids: %s. ", req_id, ",".join(map(str, meta.local_block_ids)))
             self.d2h_copy_blocks(self.host_xfer_buffers,
                                  self.device_kv_caches,
                                  meta.local_block_ids,
