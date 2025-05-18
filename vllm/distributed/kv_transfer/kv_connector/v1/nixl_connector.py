@@ -732,6 +732,11 @@ class NixlConnectorWorker:
                 self._remote_agents[engine_id], descs)
 
     def sync_recved_kv_to_device(self, req_id: str):
+        """copy recved kv from host buffer to device."""
+        if not self.use_host_buffer:
+            return
+        assert isinstance(self.h2d_copy_blocks, Callable)
+
         if req_id in self._recving_metadata and \
            req_id not in self._recving_transfers:
             meta = self._recving_metadata[req_id]
@@ -752,8 +757,11 @@ class NixlConnectorWorker:
         return
 
     def save_kv_to_host(self, metadata: NixlConnectorMetadata):
-        if not self.use_host_buffer and not self.d2h_copy_blocks:
+        """copy kv from device to host buffer."""
+        if not self.use_host_buffer:
             return
+        assert isinstance(self.h2d_copy_blocks, Callable)
+
         for req_id, meta in metadata.requests.items():
             # local prefill requests only
             if not meta.do_remote_decode:
@@ -795,7 +803,7 @@ class NixlConnectorWorker:
             assert req_id in self._recving_metadata, (
                 f"{req_id} not found in recving_metadata list")
             if self.use_host_buffer and self.h2d_copy_blocks is not None:
-                self.sync_recved_kv_to_device(req_id) 
+                self.sync_recved_kv_to_device(req_id)
             self._recving_metadata.pop(req_id)
 
         if self.world_size == 1:
