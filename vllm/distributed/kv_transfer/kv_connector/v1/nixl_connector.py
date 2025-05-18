@@ -63,17 +63,15 @@ class _NIXL_SUPPORTED_XPU:
 
     @classmethod
     def is_supported_xpu(cls,
-                         device_type: str):
+                         device_type: str) -> bool:
         return device_type in cls._support_dict
 
     @classmethod
     def is_supported_kv_buffer(cls,
                                device_type: str,
-                               kv_buffer_type: str):
-        if device_type in cls._support_dict and \
-           kv_buffer_type in cls._support_dict[device_type]:
-            return True
-        return False
+                               kv_buffer_type: str) -> bool:
+        return (device_type in cls._support_dict and
+                kv_buffer_type in cls._support_dict[device_type])
 
 
 class NixlAgentMetadata(
@@ -90,10 +88,10 @@ class NixlAgentMetadata(
 @dataclass
 class ReqMeta:
     local_block_ids: list[int]
+    remote_block_ids: list[int]
     remote_host: str
     remote_port: int
-    remote_block_ids: Optional[list[int]] = None
-    remote_engine_id: Optional[str] = None
+    remote_engine_id: str
     do_remote_prefill: bool = False
     do_remote_decode: bool = False
 
@@ -383,7 +381,7 @@ class NixlConnectorWorker:
         if not _NIXL_SUPPORTED_XPU.is_supported_xpu(
             device_type=self.device_type
         ):
-            logger.error(f"{self.device_type} is not supported.")
+            logger.error("%s is not supported.", self.device_type)
             raise RuntimeError(f"{self.device_type} is not supported.")
 
         self.vllm_config = vllm_config
@@ -548,7 +546,7 @@ class NixlConnectorWorker:
                                                        dtype=kv_dtype,
                                                        device="cpu")
         except MemoryError as e:
-            logger.error(f"NIXLConnectorWorker gets {e}")
+            logger.error("NIXLConnectorWorker gets %s.", e)
             raise
 
         self.host_xfer_buffers = xfer_buffers
@@ -747,9 +745,10 @@ class NixlConnectorWorker:
                                  local_block_ids,
                                  self.device)
             logger.debug(
-                f"sync recved kv for request:{req_id} to device xfer buffer,"
-                f" local_block_ids: {meta.local_block_ids}"
-            )
+                "synced recved kv of request[%s] to device kv buffer,"
+                "local_block_ids: %s. ",
+                req_id,
+                ",".join(map(str, meta.local_block_ids)))
         return
 
     def save_kv_to_host(self, metadata: NixlConnectorMetadata):
