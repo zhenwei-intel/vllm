@@ -397,22 +397,32 @@ class NixlConnectorWorker:
         self.num_blocks = 0
 
         # KV Caches and nixl tracking data.
-        self.kv_buffer_device: str = vllm_config.kv_transfer_config.kv_buffer_device.strip().lower()
-        if not _NIXL_SUPPORTED_XPU.is_supported_kv_buffer(self.device_type, self.kv_buffer_device):
-            raise RuntimeError(f"{current_platform.device_type} with {self.kv_buffer_device} kv_buffer is not supported.")
+        self.kv_buffer_device: str = \
+            vllm_config.kv_transfer_config.kv_buffer_device.strip().lower()
+        if not _NIXL_SUPPORTED_XPU.is_supported_kv_buffer(
+            device_type=self.device_type,
+            kv_buffer_type=self.kv_buffer_device
+        ):
+            raise RuntimeError(
+                f"{self.device_type} with {self.kv_buffer_device} kv_buffer"
+                "is not supported."
+            )
         self.device_kv_caches: dict[str, torch.Tensor] = {}
         self.device = None
 
         # cpu kv buffer for xfer
         # used when xPU memory can not be registered under nixl
         self.host_xfer_buffers: dict[str, torch.Tensor] = {}
-        self.use_host_buffer = True if self.kv_buffer_device == "cpu" else False
+        self.use_host_buffer = self.kv_buffer_device == "cpu"
         if self.kv_buffer_device == "cuda":
             self.nixl_memory_type = "VRAM"
         elif self.kv_buffer_device == "cpu":
             self.nixl_memory_type = "DRAM"
         else:
-            raise RuntimeError(f"{self.device_type} with {self.kv_buffer_device} kv_buffer is not supported.")
+            raise RuntimeError(
+                f"{self.device_type} with {self.kv_buffer_device} kv_buffer"
+                "is not supported."
+            )
 
         # Note: host xfer buffer ops when use_host_buffer is True
         self.d2h_copy_blocks: Optional[Callable] = None
@@ -632,7 +642,8 @@ class NixlConnectorWorker:
                          self.block_window_per_layer)
             assert len(self.block_window_per_layer) == self.num_layers
 
-        descs = self.nixl_wrapper.get_reg_descs(caches_data, self.nixl_memory_type)
+        descs = self.nixl_wrapper.get_reg_descs(caches_data,
+                                                self.nixl_memory_type)
         logger.debug("Registering descs: %s", caches_data)
         self.nixl_wrapper.register_memory(descs)
         logger.debug("Done registering descs")
@@ -677,7 +688,8 @@ class NixlConnectorWorker:
                      len(blocks_data), self.engine_id, self.rank)
 
         # Register with NIXL.
-        descs = self.nixl_wrapper.get_xfer_descs(blocks_data, self.nixl_memory_type)
+        descs = self.nixl_wrapper.get_xfer_descs(blocks_data,
+                                                 self.nixl_memory_type)
         self.src_xfer_side_handle = self.nixl_wrapper.prep_xfer_dlist(
             "NIXL_INIT_AGENT", descs)
 
@@ -694,13 +706,15 @@ class NixlConnectorWorker:
                      len(blocks_data), engine_id, self.rank)
 
         # Register with NIXL.
-        descs = self.nixl_wrapper.get_xfer_descs(blocks_data, self.nixl_memory_type)
+        descs = self.nixl_wrapper.get_xfer_descs(blocks_data,
+                                                 self.nixl_memory_type)
         self.dst_xfer_side_handles[
             engine_id] = self.nixl_wrapper.prep_xfer_dlist(
                 self._remote_agents[engine_id], descs)
 
     def sync_recved_kv_to_device(self, req_id: str):
-        if req_id in self._recving_metadata and req_id not in self._recving_transfers:
+        if req_id in self._recving_metadata and \
+           req_id not in self._recving_transfers:
             meta = self._recving_metadata[req_id]
             # local decode only
             if not meta.do_remote_prefill:
@@ -713,7 +727,7 @@ class NixlConnectorWorker:
                                  self.device)
             logger.debug(
                 f"sync recved kv for request:{req_id} to device xfer buffer,"
-                f" local_block_ids: {meta.local_block_ids}" 
+                f" local_block_ids: {meta.local_block_ids}"
             )
         return
 
@@ -726,8 +740,10 @@ class NixlConnectorWorker:
                 continue
             # blocking
             logger.debug(
-                "save_load_kv for request (do_remote_decode) %s to host xfer buffer." 
-                "local_block_ids: %s. ", req_id, ",".join(map(str, meta.local_block_ids)))
+                "save_load_kv for request[%s] to host xfer buffer." 
+                "local_block_ids: %s. ",
+                req_id,
+                ",".join(map(str, meta.local_block_ids)))
             self.d2h_copy_blocks(self.host_xfer_buffers,
                                  self.device_kv_caches,
                                  meta.local_block_ids,

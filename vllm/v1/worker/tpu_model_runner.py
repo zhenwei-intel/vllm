@@ -3,7 +3,7 @@ import bisect
 import gc
 import time
 import copy
-from typing import TYPE_CHECKING, Optional, cast, Union, Tuple
+from typing import TYPE_CHECKING, Optional, cast, Union
 from unittest.mock import patch
 
 import numpy as np
@@ -1528,7 +1528,7 @@ def _make_src_and_dst_indices(
     dst_block_ids: list[int],
     src_device: Union[torch.device, str],
     dst_device: Union[torch.device, str],
-) -> Optional[Tuple[torch.Tensor, torch.Tensor]]:
+) -> Optional[tuple[torch.Tensor, torch.Tensor]]:
     src_indices = torch.tensor(src_block_ids,
                                device=src_device,
                                dtype=torch.int64)
