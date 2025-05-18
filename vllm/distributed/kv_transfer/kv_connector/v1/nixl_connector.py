@@ -735,7 +735,7 @@ class NixlConnectorWorker:
         """copy recved kv from host buffer to device."""
         if not self.use_host_buffer:
             return
-        assert isinstance(self.h2d_copy_blocks, Callable)
+        assert self.h2d_copy_blocks is not None
 
         if req_id in self._recving_metadata and \
            req_id not in self._recving_transfers:
@@ -760,7 +760,7 @@ class NixlConnectorWorker:
         """copy kv from device to host buffer."""
         if not self.use_host_buffer:
             return
-        assert isinstance(self.h2d_copy_blocks, Callable)
+        assert self.h2d_copy_blocks is not None
 
         for req_id, meta in metadata.requests.items():
             # local prefill requests only
