@@ -10,7 +10,7 @@ import copy
 from collections import defaultdict
 from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Optional, Callable
 
 import msgspec
 import torch
@@ -49,13 +49,31 @@ except ImportError:
     NixlWrapper = None
 
 
-class _NIXL_SUPPORTED_XPU_TYPE(enum.Enum):
-    """nixl_connector supports the following xPUs (GPU not included)"""  
-    TPU = "tpu"
+class _NIXL_SUPPORTED_XPU:
+    """
+    xPUs and the corresponding types of kv transfer buffer
+    supported by NIXLConnector
+    """
+    # {xPU: tuple of supported kv buffer types}
+    # TODO: "cpu" xfer buffer for cuda
+    _support_dict = {
+        "cuda": ("cuda",),
+        "tpu": ("cpu",),
+    }
 
     @classmethod
-    def support(cls, value):
-        return value in cls._value2member_map_
+    def is_supported_xpu(cls,
+                         device_type: str):
+        return device_type in cls._support_dict
+
+    @classmethod
+    def is_supported_kv_buffer(cls,
+                               device_type: str,
+                               kv_buffer_type: str):
+        if device_type in cls._support_dict and \
+           kv_buffer_type in cls._support_dict[device_type]:
+            return True
+        return False
 
 
 class NixlAgentMetadata(
@@ -357,6 +375,13 @@ class NixlConnectorWorker:
         logger.info("Initializing NIXL wrapper")
         logger.info("Initializing NIXL worker %s", engine_id)
 
+        self.device_type = current_platform.device_type
+        if not _NIXL_SUPPORTED_XPU.is_supported_xpu(
+            device_type=self.device_type
+        ):
+            logger.error(f"{self.device_type} is not supported.")
+            raise RuntimeError(f"{self.device_type} is not supported.")
+
         self.vllm_config = vllm_config
 
         # Agent.
@@ -369,27 +394,29 @@ class NixlConnectorWorker:
         self.rank = get_tensor_model_parallel_rank()
         self.world_size = get_tensor_model_parallel_world_size()
         self.tp_group = get_tp_group()
+        self.num_blocks = 0
 
         # KV Caches and nixl tracking data.
         self.kv_buffer_device: str = vllm_config.kv_transfer_config.kv_buffer_device.strip().lower()
-        assert self.kv_buffer_device == current_platform.device_type, f"--{self.kv_buffer_device}, {current_platform.device_type}"
+        if not _NIXL_SUPPORTED_XPU.is_supported_kv_buffer(self.device_type, self.kv_buffer_device):
+            raise RuntimeError(f"{current_platform.device_type} with {self.kv_buffer_device} kv_buffer is not supported.")
         self.device_kv_caches: dict[str, torch.Tensor] = {}
         self.device = None
 
         # cpu kv buffer for xfer
         # used when xPU memory can not be registered under nixl
         self.host_xfer_buffers: dict[str, torch.Tensor] = {}
-        self.use_host_buffer = True if _NIXL_SUPPORTED_XPU_TYPE.support(self.kv_buffer_device) else False
+        self.use_host_buffer = True if self.kv_buffer_device == "cpu" else False
         if self.kv_buffer_device == "cuda":
             self.nixl_memory_type = "VRAM"
-        elif _NIXL_SUPPORTED_XPU_TYPE.support(self.kv_buffer_device):
+        elif self.kv_buffer_device == "cpu":
             self.nixl_memory_type = "DRAM"
         else:
-            raise ValueError(f"{self.kv_buffer_device} is not support by NIXL_CONNECTOR.")
+            raise RuntimeError(f"{self.device_type} with {self.kv_buffer_device} kv_buffer is not supported.")
 
         # Note: host xfer buffer ops when use_host_buffer is True
-        self.d2h_copy_blocks: Optional[Any] = None
-        self.h2d_copy_blocks: Optional[Any] = None
+        self.d2h_copy_blocks: Optional[Callable] = None
+        self.h2d_copy_blocks: Optional[Callable] = None
 
         # Map of engine_id -> kv_caches_base_addr
         self.kv_caches_base_addr: dict[str, list[int]] = {}
@@ -497,15 +524,23 @@ class NixlConnectorWorker:
     def initialize_host_xfer_buffer(self, kv_caches: dict[str, torch.Tensor]) -> None:
         """Initialize transfer buffer in CPU mem for xPUs (e.g., tpu)"""
         xfer_buffers: dict[str, torch.Tensor] = {}
-        for layer_name, kv_cache in kv_caches.items():
-            kv_shape = kv_cache.shape
-            kv_dtype = kv_cache.dtype
-            xfer_buffers[layer_name] = torch.zeros(kv_shape,
-                                                   dtype=kv_dtype,
-                                                   device="cpu")
+        try:
+            for layer_name, kv_cache in kv_caches.items():
+                kv_shape = kv_cache.shape
+                kv_dtype = kv_cache.dtype
+                xfer_buffers[layer_name] = torch.zeros(kv_shape,
+                                                    dtype=kv_dtype,
+                                                    device="cpu")
+        except MemoryError as e:
+            logger.error(f"NIXLConnectorWorker is allocating host xfer buffer and gets {e}")
+            raise
+
         self.host_xfer_buffers = xfer_buffers
         
-    def set_host_xfer_buffer_ops(self, d2h_copy_blocks: Any, h2d_copy_blocks: Any):
+    def set_host_xfer_buffer_ops(self,
+                                 d2h_copy_blocks: Callable,
+                                 h2d_copy_blocks: Callable):
+        """Assign copy (d2h, h2d) operations when host buffer is used."""
         assert self.use_host_buffer
         self.d2h_copy_blocks = d2h_copy_blocks
         self.h2d_copy_blocks = h2d_copy_blocks
@@ -522,29 +557,27 @@ class NixlConnectorWorker:
             xfer_buffers = self.host_xfer_buffers
         else:
             xfer_buffers = kv_caches
-            assert not self.host_xfer_buffers, f"host tranfer buffer should not be initialized when kv_buffer_device is {self.kv_buffer_device}"
+            assert not self.host_xfer_buffers, f"host_xfer_buffer should not be initialized when kv_buffer_device is {self.kv_buffer_device}"
 
-        # TODO(tms): Find a more robust way to detect and handle MLA
+        # TODO(tms): Find a more robust way to detect and handle xPU / attn. backend, and MLA
         use_mla = len(first_kv_cache.shape) == 3
-        if self.use_host_buffer:
-            # TODO: TPU only, need to support other xPUs
-            assert self.kv_buffer_device == 'tpu', f"{self.kv_buffer_device} is not supported by NIXL_CONNECTOR."
-            # NOTE: TPU does not support MLA
+        if self.device_type == "tpu":
             assert not use_mla, f"{self.kv_buffer_device} does not support MLA."
             # tpu (v1) kv shape per layer: (num_blocks, block_size, num_kv_heads * 2, head_size)
             self.num_blocks = first_kv_cache.shape[0]
             block_rank = 3  # [block_size, kv_heads, head_dim]
-            block_shape = first_kv_cache.shape[-block_rank:]
-        elif use_mla:
-            # MLA case.
-            self.num_blocks = first_kv_cache.shape[0]
-            block_rank = 2  # [block_size, latent_dim]
-            block_shape = first_kv_cache.shape[-block_rank:]
+        elif self.device_type == "cuda":
+            if use_mla:
+                # MLA case.
+                self.num_blocks = first_kv_cache.shape[0]
+                block_rank = 2  # [block_size, latent_dim]
+            else:
+                # [2 (k and v), num_blocks, ...]
+                self.num_blocks = first_kv_cache.shape[1]
+                block_rank = 3  # [block_size, kv_heads, head_dim]
         else:
-            # [2 (k and v), num_blocks, ...]
-            self.num_blocks = first_kv_cache.shape[1]
-            block_rank = 3  # [block_size, kv_heads, head_dim]
-            block_shape = first_kv_cache.shape[-block_rank:]
+            raise RuntimeError(f"{self.device_type} is not supported yet.")
+        block_shape = first_kv_cache.shape[-block_rank:]
 
         # TODO(tms): self.block_len needs to be per-layer for sliding window,
         # hybrid attn, etc
