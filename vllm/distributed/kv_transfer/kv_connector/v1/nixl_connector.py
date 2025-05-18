@@ -175,9 +175,12 @@ class NixlConnector(KVConnectorBase_V1):
         assert self.connector_worker is not None
         self.connector_worker.register_kv_caches(kv_caches)
 
-    def set_host_xfer_buffer_ops(self, d2h_copy_blocks: Any, h2d_copy_blocks: Any):
+    def set_host_xfer_buffer_ops(self,
+                                 d2h_copy_blocks: Callable,
+                                 h2d_copy_blocks: Callable):
         assert self.connector_worker is not None
-        self.connector_worker.set_host_xfer_buffer_ops(d2h_copy_blocks, h2d_copy_blocks)
+        self.connector_worker.set_host_xfer_buffer_ops(d2h_copy_blocks,
+                                                       h2d_copy_blocks)
 
     def get_finished(self,
                      finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
@@ -275,7 +278,8 @@ class NixlConnectorScheduler:
             all_full = request.num_tokens % self.block_size == 0
             full_block_ids = (block_ids if all_full else block_ids[:-1])
             if full_block_ids:
-                self._reqs_need_send[request.request_id] = (request, full_block_ids)
+                self._reqs_need_send[request.request_id] = \
+                    (request, full_block_ids)
         elif params.get("do_remote_prefill"):
             # NOTE(rob): if prompt < block_size, no remote blocks
             # since the remote only sends fully computed blocks, so
@@ -531,7 +535,9 @@ class NixlConnectorWorker:
             logger.debug("NIXL handshake: add agent took: %s",
                          setup_agent_time - got_metadata_time)
 
-    def initialize_host_xfer_buffer(self, kv_caches: dict[str, torch.Tensor]) -> None:
+    def initialize_host_xfer_buffer(self,
+                                    kv_caches: dict[str, torch.Tensor]
+    ) -> None:
         """Initialize transfer buffer in CPU mem for xPUs (e.g., tpu)"""
         xfer_buffers: dict[str, torch.Tensor] = {}
         try:
@@ -539,14 +545,14 @@ class NixlConnectorWorker:
                 kv_shape = kv_cache.shape
                 kv_dtype = kv_cache.dtype
                 xfer_buffers[layer_name] = torch.zeros(kv_shape,
-                                                    dtype=kv_dtype,
-                                                    device="cpu")
+                                                       dtype=kv_dtype,
+                                                       device="cpu")
         except MemoryError as e:
-            logger.error(f"NIXLConnectorWorker is allocating host xfer buffer and gets {e}")
+            logger.error(f"NIXLConnectorWorker gets {e}")
             raise
 
         self.host_xfer_buffers = xfer_buffers
-        
+
     def set_host_xfer_buffer_ops(self,
                                  d2h_copy_blocks: Callable,
                                  h2d_copy_blocks: Callable):
@@ -563,17 +569,25 @@ class NixlConnectorWorker:
 
         if self.use_host_buffer:
             self.initialize_host_xfer_buffer(kv_caches=kv_caches)
-            assert len(self.host_xfer_buffers) == len(kv_caches), f"host_buffer: {len(self.host_xfer_buffers)}, kv_caches: {len(kv_caches)}"
+            assert len(self.host_xfer_buffers) == len(kv_caches), (
+                f"host_buffer: {len(self.host_xfer_buffers)}, "
+                f"kv_caches: {len(kv_caches)}"
+            )
             xfer_buffers = self.host_xfer_buffers
         else:
             xfer_buffers = kv_caches
-            assert not self.host_xfer_buffers, f"host_xfer_buffer should not be initialized when kv_buffer_device is {self.kv_buffer_device}"
+            assert not self.host_xfer_buffers, (
+                "host_xfer_buffer should not be initialized when "
+                f"kv_buffer_device is {self.kv_buffer_device}"
+            )
 
-        # TODO(tms): Find a more robust way to detect and handle xPU / attn. backend, and MLA
+        # TODO(tms): Find a more robust way to detect and handle
+        # xPU / attn. backend, and MLA
         use_mla = len(first_kv_cache.shape) == 3
         if self.device_type == "tpu":
             assert not use_mla, f"{self.kv_buffer_device} does not support MLA."
-            # tpu (v1) kv shape per layer: (num_blocks, block_size, num_kv_heads * 2, head_size)
+            # tpu (v1) kv shape per layer:
+            # (num_blocks, block_size, num_kv_heads * 2, head_size)
             self.num_blocks = first_kv_cache.shape[0]
             block_rank = 3  # [block_size, kv_heads, head_dim]
         elif self.device_type == "cuda":
@@ -593,8 +607,11 @@ class NixlConnectorWorker:
         # hybrid attn, etc
         self.block_len = kv_elem_size * math.prod(block_shape)
 
-        logger.debug("Registering KV_Caches. use_mla: %s, kv_buffer_device: %s, use_host_buffer: %s, shape %s",
-                     use_mla, self.kv_buffer_device, self.use_host_buffer, first_kv_cache.shape)
+        logger.debug(
+            "Registering KV_Caches. use_mla: %s, kv_buffer_device: %s, "
+            "use_host_buffer: %s, shape %s",
+            use_mla, self.kv_buffer_device, self.use_host_buffer,
+            first_kv_cache.shape)
         logger.debug("num_blocks: %s, block_shape: %s", self.num_blocks,
                      block_shape)
         logger.debug("Per layer kv cache size: %s", first_kv_cache.shape)
@@ -612,7 +629,11 @@ class NixlConnectorWorker:
         # (roughly 8KB vs 5KB).
         for cache_or_caches in xfer_buffers.values():
             # Normalize to always be a list of caches
-            cache_list = [cache_or_caches] if use_mla or self.use_host_buffer else cache_or_caches
+            cache_list = (
+                [cache_or_caches]
+                if use_mla or self.use_host_buffer
+                else cache_or_caches
+            )
             for cache in cache_list:
                 base_addr = cache.data_ptr()
                 region_len = self.num_blocks * self.block_len
@@ -772,7 +793,8 @@ class NixlConnectorWorker:
                 len(done_recving))
 
         for req_id in done_recving:
-            assert req_id in self._recving_metadata, f"{req_id} not found in recving_metadata list"
+            assert req_id in self._recving_metadata, (
+                f"{req_id} not found in recving_metadata list")
             if self.use_host_buffer and self.h2d_copy_blocks is not None:
                 self.sync_recved_kv_to_device(req_id) 
             self._recving_metadata.pop(req_id)
