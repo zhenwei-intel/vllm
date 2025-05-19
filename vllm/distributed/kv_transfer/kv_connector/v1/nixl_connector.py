@@ -289,10 +289,6 @@ class NixlConnectorScheduler:
                 self._reqs_need_send[request.request_id] = \
                     (request, full_block_ids)
         elif params.get("do_remote_prefill"):
-            # NOTE(rob): if prompt < block_size, no remote blocks
-            # since the remote only sends fully computed blocks, so
-            # skip recving for this request. num_external_tokens
-            # should be 0 if there are no remote blocks.
             if params.get("remote_block_ids"):
                 if all(p in params for p in ("remote_engine_id", "remote_host",
                                              "remote_port")):
