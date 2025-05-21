@@ -256,14 +256,15 @@ class NixlConnectorScheduler:
             if count > 0:
                 return count, True
 
-            # NOTE: if count is 0 here, we have less than block_size
-            # tokens to pull after subtracting the local prefix cache hit.
-            # The remote only sends fully computed blocks, so there is
-            # nothing to transfer but we still need to notify the
-            # prefill worker so that the remote blocks are freed.
-            if all(p in params for p in ("remote_engine_id", "remote_host",
-                                         "remote_port")):
-                self._reqs_need_recv[request.request_id] = (request, [])
+
+
+
+
+
+
+
+
+
 
         # No remote prefill for this request.
         return 0, False
@@ -281,10 +282,15 @@ class NixlConnectorScheduler:
         if not params:
             return
         if params.get("do_remote_decode"):
-            # NOTE: only need to save / send full computed blocks
+            # NOTE: figure out full computed blocks to send / save
             block_ids = blocks.get_block_ids()[0]
             all_full = request.num_tokens % self.block_size == 0
             full_block_ids = (block_ids if all_full else block_ids[:-1])
+            # TODO: skip the blocks that are already in the host xfer buffer.
+            # Currently, the host xfer buffer block is 1-to-1 mapped to device
+            # kv blocks, so host blocks won't be flushed as long as its device 
+            # block is not overwritten; and it will be safe to skip saving them
+            # to host xfer buffer.
             if full_block_ids:
                 self._reqs_need_send[request.request_id] = \
                     (request, full_block_ids)
@@ -292,9 +298,17 @@ class NixlConnectorScheduler:
             if params.get("remote_block_ids"):
                 if all(p in params for p in ("remote_engine_id", "remote_host",
                                              "remote_port")):
-                    # Get unhashed blocks to pull from remote.
+                    # NOTE: if num_external_tokens is 0 here,
+                    # we have less than block_size tokens to pull 
+                    # after subtracting the local prefix cache hit.
+                    # The remote only sends fully computed blocks, so there is
+                    # nothing to transfer but we still need to notify the
+                    # prefill worker so that the remote blocks are freed.
+                    # Otherwise, get unhashed blocks to pull from remote.
+                    recving_block_ids = blocks.get_unhashed_block_ids() \
+                                        if num_external_tokens > 0 else []
                     self._reqs_need_recv[request.request_id] = (
-                        request, blocks.get_unhashed_block_ids())
+                        request, recving_block_ids)
                 else:
                     logger.warning(
                         "Got invalid KVTransferParams: %s. This "
@@ -946,7 +960,7 @@ class NixlConnectorWorker:
         # just notify P worker that we have the blocks we need.
         num_local_blocks = len(local_block_ids)
         if num_local_blocks == 0:
-            self.nixl_wrapper.send_notif(dst_engine_id,
+            self.nixl_wrapper.send_notif(self._remote_agents[dst_engine_id],
                                          notif_msg=request_id.encode("utf-8"))
             return
 
