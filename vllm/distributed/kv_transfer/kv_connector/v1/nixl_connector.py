@@ -426,7 +426,7 @@ class NixlConnectorWorker:
             kv_buffer_type=self.kv_buffer_device
         ):
             raise RuntimeError(
-                f"{self.device_type} with {self.kv_buffer_device} kv_buffer"
+                f"{self.device_type} with {self.kv_buffer_device} kv_buffer "
                 "is not supported."
             )
         self.device_kv_caches: dict[str, torch.Tensor] = {}
@@ -442,7 +442,7 @@ class NixlConnectorWorker:
             self.nixl_memory_type = "DRAM"
         else:
             raise RuntimeError(
-                f"{self.device_type} with {self.kv_buffer_device} kv_buffer"
+                f"{self.device_type} with {self.kv_buffer_device} kv_buffer "
                 "is not supported."
             )
 
