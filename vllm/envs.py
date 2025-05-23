@@ -117,7 +117,7 @@ if TYPE_CHECKING:
     VLLM_NIXL_SIDE_CHANNEL_HOST: str = "localhost"
     VLLM_NIXL_SIDE_CHANNEL_PORT: int = 5557
     VLLM_ALL2ALL_BACKEND: str = "naive"
-    VLLM_MULTIPROC_EXECUTE_MODEL_TIMEOUT_S: int = 40
+    VLLM_MULTIPROC_EXECUTE_MODEL_TIMEOUT_S: int = 300
 
 
 def get_default_cache_root():
