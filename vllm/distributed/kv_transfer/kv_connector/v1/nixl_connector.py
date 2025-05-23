@@ -256,16 +256,6 @@ class NixlConnectorScheduler:
             if count > 0:
                 return count, True
 
-
-
-
-
-
-
-
-
-
-
         # No remote prefill for this request.
         return 0, False
 
