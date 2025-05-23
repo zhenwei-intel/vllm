@@ -10,6 +10,12 @@ import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse
 
+import logging
+
+
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -213,6 +219,8 @@ async def handle_completions(request: Request):
 
         # Get the next decode client in round-robin fashion
         decode_client_info = get_next_client(request.app, 'decode')
+
+        logger.debug("Using %s %s", prefill_client_info, decode_client_info)
 
         # Stream response from decode service
         async def generate_stream():
