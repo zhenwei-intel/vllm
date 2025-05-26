@@ -59,6 +59,7 @@ class _NIXL_SUPPORTED_XPU:
     _support_dict = {
         "cuda": ("cuda",),
         "tpu": ("cpu",),
+        "xpu": ("cpu",),
     }
 
     @classmethod
@@ -169,6 +170,7 @@ class NixlConnector(KVConnectorBase_V1):
     ############################################################
     # Worker Side Methods
     ############################################################
+
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         assert self.connector_worker is not None
         self.connector_worker.register_kv_caches(kv_caches)
@@ -598,7 +600,8 @@ class NixlConnectorWorker:
             # (num_blocks, block_size, num_kv_heads * 2, head_size)
             self.num_blocks = first_kv_cache.shape[0]
             block_rank = 3  # [block_size, kv_heads, head_dim]
-        elif self.device_type == "cuda":
+        elif self.device_type in ["cuda", "xpu"]:
+            # (2, num_blocks, block_size, kv_heads, head_dim)
             if use_mla:
                 # MLA case.
                 self.num_blocks = first_kv_cache.shape[0]
