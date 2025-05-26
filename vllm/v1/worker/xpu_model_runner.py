@@ -366,7 +366,8 @@ def _insert_blocks_to_xpu(
     xpu_block_indices: torch.Tensor,
 ) -> None:
     # No buffer donor op for XPU, just assign
-    xpu_cache[xpu_block_indices] = src_cache
+    xpu_cache[:, xpu_block_indices] = src_cache
+    torch.xpu.synchronize()
 
 def _swap_out_xpu_blocks(
     xpu_cache: torch.Tensor,
@@ -375,8 +376,8 @@ def _swap_out_xpu_blocks(
     cpu_block_indices: torch.Tensor,
 ) -> None:
     """ xpu blocks to cpu blocks"""
-    _xpu_cache = xpu_cache[xpu_block_indices]
-    cpu_cache[cpu_block_indices] = _xpu_cache.cpu()
+    _xpu_cache = xpu_cache[:, xpu_block_indices]
+    cpu_cache[:, cpu_block_indices] = _xpu_cache.cpu()
 
 def h2d_copy_blocks(
     cpu_kv_caches: dict[torch.Tensor],
@@ -396,7 +397,7 @@ def h2d_copy_blocks(
     for layer_name in cpu_kv_caches:
         host_tensor = cpu_kv_caches[layer_name]
         device_tensor = xpu_kv_caches[layer_name]
-        sliced_device_tensor = host_tensor[host_indices].to(xpu_device)
+        sliced_device_tensor = host_tensor[:, host_indices].to(xpu_device)
         _insert_blocks_to_xpu(sliced_device_tensor, device_tensor, device_indices)
 
 def d2h_copy_blocks(
