@@ -360,66 +360,65 @@ def _make_src_and_dst_indices(
                                dtype=torch.int64)
     return src_indices, dst_indices
 
-@torch.compile(backend="openxla")
-def _insert_blocks_to_tpu(
+def _insert_blocks_to_xpu(
     src_cache: torch.Tensor,
-    tpu_cache: torch.Tensor,
-    tpu_block_indices: torch.Tensor,
+    xpu_cache: torch.Tensor,
+    xpu_block_indices: torch.Tensor,
 ) -> None:
-    torch.ops.xla.dynamo_set_buffer_donor_(tpu_cache, True)
-    tpu_cache[tpu_block_indices] = src_cache
+    # No buffer donor op for XPU, just assign
+    xpu_cache[xpu_block_indices] = src_cache
 
-@torch.compile(backend="openxla")
-def _swap_out_tpu_blocks(
-    tpu_cache: torch.Tensor,
+def _swap_out_xpu_blocks(
+    xpu_cache: torch.Tensor,
     cpu_cache: torch.Tensor,
-    tpu_block_indices: torch.Tensor,
+    xpu_block_indices: torch.Tensor,
     cpu_block_indices: torch.Tensor,
 ) -> None:
-    """ tpu blocks to cpu blocks"""
-    torch.ops.xla.dynamo_set_buffer_donor_(tpu_cache, True)
-    _tpu_cache = tpu_cache[tpu_block_indices]
-    cpu_cache[cpu_block_indices] = _tpu_cache.cpu()
+    """ xpu blocks to cpu blocks"""
+    _xpu_cache = xpu_cache[xpu_block_indices]
+    cpu_cache[cpu_block_indices] = _xpu_cache.cpu()
 
 def h2d_copy_blocks(
     cpu_kv_caches: dict[torch.Tensor],
-    tpu_kv_caches: dict[torch.Tensor],
+    xpu_kv_caches: dict[torch.Tensor],
     cpu_block_ids: list[int],
-    tpu_block_ids: list[int],
-    tpu_device: str,
+    xpu_block_ids: list[int],
+    xpu_device: str,
 ) -> None:
     """Copy kv blocks from host xfer buffer to device."""
-    if not cpu_block_ids or not tpu_block_ids or len(cpu_block_ids) != len(tpu_block_ids):
+    if not cpu_block_ids or not xpu_block_ids or len(cpu_block_ids) != len(xpu_block_ids):
         return
-    host_indices, device_indices = _make_src_and_dst_indices(src_block_ids=cpu_block_ids,
-                                                    dst_block_ids=tpu_block_ids,
-                                                    src_device="cpu",
-                                                    dst_device=tpu_device)
+    host_indices, device_indices = _make_src_and_dst_indices(
+        src_block_ids=cpu_block_ids,
+        dst_block_ids=xpu_block_ids,
+        src_device="cpu",
+        dst_device=xpu_device)
     for layer_name in cpu_kv_caches:
         host_tensor = cpu_kv_caches[layer_name]
-        device_tensor = tpu_kv_caches[layer_name]
-        sliced_device_tensor = host_tensor[host_indices].to(tpu_device)
-        _insert_blocks_to_tpu(sliced_device_tensor, device_tensor, device_indices)
-
+        device_tensor = xpu_kv_caches[layer_name]
+        sliced_device_tensor = host_tensor[host_indices].to(xpu_device)
+        _insert_blocks_to_xpu(sliced_device_tensor, device_tensor, device_indices)
 
 def d2h_copy_blocks(
     cpu_kv_caches: dict[torch.Tensor],
-    tpu_kv_caches: dict[torch.Tensor],
+    xpu_kv_caches: dict[torch.Tensor],
     cpu_block_ids: list[int],
-    tpu_block_ids: list[int],
-    tpu_device: str,
+    xpu_block_ids: list[int],
+    xpu_device: str,
 ) -> None:
     """Copy kv blocks from device to host xfer buffer."""
-    if not cpu_block_ids or not tpu_block_ids or len(cpu_block_ids) != len(tpu_block_ids):
+    if not cpu_block_ids or not xpu_block_ids or len(cpu_block_ids) != len(xpu_block_ids):
         return
-    device_indices, host_indices = _make_src_and_dst_indices(src_block_ids=tpu_block_ids,
-                                                    dst_block_ids=cpu_block_ids,
-                                                    src_device=tpu_device,
-                                                    dst_device="cpu")
+    device_indices, host_indices = _make_src_and_dst_indices(
+        src_block_ids=xpu_block_ids,
+        dst_block_ids=cpu_block_ids,
+        src_device=xpu_device,
+        dst_device="cpu")
     for layer_name in cpu_kv_caches:
         host_tensor = cpu_kv_caches[layer_name]
-        device_tensor = tpu_kv_caches[layer_name]
-        _swap_out_tpu_blocks(tpu_cache=device_tensor,
-                            cpu_cache=host_tensor,
-                            tpu_block_indices=device_indices,
-                            cpu_block_indices=host_indices)
+        device_tensor = xpu_kv_caches[layer_name]
+        _swap_out_xpu_blocks(
+            xpu_cache=device_tensor,
+            cpu_cache=host_tensor,
+            xpu_block_indices=device_indices,
+            cpu_block_indices=host_indices)
