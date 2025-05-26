@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 import gc
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Optional, cast, Union
 
 import numpy as np
 import torch
@@ -21,6 +21,12 @@ from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+from vllm.v1.kv_cache_interface import (AttentionSpec, FullAttentionSpec,
+                                        KVCacheConfig, KVCacheSpec,
+                                        SlidingWindowSpec)
+from vllm.distributed.kv_transfer import (get_kv_transfer_group,
+                                          has_kv_transfer_group)
+from vllm.v1.utils import bind_kv_cache
 
 if TYPE_CHECKING:
     from vllm.v1.core.scheduler import SchedulerOutput
@@ -287,3 +293,133 @@ class XPUModelRunner(GPUModelRunner):
         logits = logits[:self.max_num_tokens]
         torch.xpu.synchronize()
         gc.collect()
+
+    def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
+        """
+        Initialize KV cache based on `kv_cache_config`.
+        Args:
+            kv_cache_config: Configuration for the KV cache, including the KV
+            cache size of each layer
+        """
+        if len(kv_cache_config.kv_cache_groups) > 1:
+            raise NotImplementedError(
+                "Hybrid models with more than one KV cache type are not "
+                "supported yet.")
+        self.kv_cache_config = kv_cache_config
+        self.initialize_attn_backend(kv_cache_config)
+
+        kv_caches: dict[str, torch.Tensor] = {}
+
+        for i, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
+            kv_cache_spec = kv_cache_group.kv_cache_spec
+            for layer_name in kv_cache_group.layer_names:
+                tensor_config = kv_cache_config.tensors[layer_name]
+                assert tensor_config.size % kv_cache_spec.page_size_bytes == 0
+                num_blocks = tensor_config.size // kv_cache_spec.page_size_bytes
+                # `num_blocks` is the number of blocks the model runner can use.
+                # `kv_cache_config.num_blocks` is the number of blocks that
+                # KVCacheManager may allocate.
+                # Since different GPUs may have different number of layers and
+                # different memory capacities, `num_blocks` can be different on
+                # different GPUs, and `kv_cache_config.num_blocks` is set to
+                # the min of all `num_blocks`. Verify it here.
+                assert num_blocks >= kv_cache_config.num_blocks
+                if isinstance(kv_cache_spec, AttentionSpec):
+                    kv_cache_shape = self.attn_backends[i].get_kv_cache_shape(
+                        num_blocks, kv_cache_spec.block_size,
+                        kv_cache_spec.num_kv_heads, kv_cache_spec.head_size)
+                    dtype = kv_cache_spec.dtype
+                    kv_caches[layer_name] = torch.zeros(kv_cache_shape,
+                                                        dtype=dtype,
+                                                        device=self.device)
+                else:
+                    # TODO: add new branches when introducing more types of
+                    # KV cache specs.
+                    raise ValueError("Unknown KV cache spec type.")
+
+        bind_kv_cache(
+            kv_caches,
+            self.vllm_config.compilation_config.static_forward_context,
+            self.kv_caches)
+
+        if has_kv_transfer_group():
+            get_kv_transfer_group().register_kv_caches(kv_caches)
+            get_kv_transfer_group().set_host_xfer_buffer_ops(d2h_copy_blocks, h2d_copy_blocks)
+
+def _make_src_and_dst_indices(
+    src_block_ids: list[int],
+    dst_block_ids: list[int],
+    src_device: Union[torch.device, str],
+    dst_device: Union[torch.device, str],
+) -> Optional[tuple[torch.Tensor, torch.Tensor]]:
+    src_indices = torch.tensor(src_block_ids,
+                               device=src_device,
+                               dtype=torch.int64)
+    dst_indices = torch.tensor(dst_block_ids,
+                               device=dst_device,
+                               dtype=torch.int64)
+    return src_indices, dst_indices
+
+@torch.compile(backend="openxla")
+def _insert_blocks_to_tpu(
+    src_cache: torch.Tensor,
+    tpu_cache: torch.Tensor,
+    tpu_block_indices: torch.Tensor,
+) -> None:
+    torch.ops.xla.dynamo_set_buffer_donor_(tpu_cache, True)
+    tpu_cache[tpu_block_indices] = src_cache
+
+@torch.compile(backend="openxla")
+def _swap_out_tpu_blocks(
+    tpu_cache: torch.Tensor,
+    cpu_cache: torch.Tensor,
+    tpu_block_indices: torch.Tensor,
+    cpu_block_indices: torch.Tensor,
+) -> None:
+    """ tpu blocks to cpu blocks"""
+    torch.ops.xla.dynamo_set_buffer_donor_(tpu_cache, True)
+    _tpu_cache = tpu_cache[tpu_block_indices]
+    cpu_cache[cpu_block_indices] = _tpu_cache.cpu()
+
+def h2d_copy_blocks(
+    cpu_kv_caches: dict[torch.Tensor],
+    tpu_kv_caches: dict[torch.Tensor],
+    cpu_block_ids: list[int],
+    tpu_block_ids: list[int],
+    tpu_device: str,
+) -> None:
+    """Copy kv blocks from host xfer buffer to device."""
+    if not cpu_block_ids or not tpu_block_ids or len(cpu_block_ids) != len(tpu_block_ids):
+        return
+    host_indices, device_indices = _make_src_and_dst_indices(src_block_ids=cpu_block_ids,
+                                                    dst_block_ids=tpu_block_ids,
+                                                    src_device="cpu",
+                                                    dst_device=tpu_device)
+    for layer_name in cpu_kv_caches:
+        host_tensor = cpu_kv_caches[layer_name]
+        device_tensor = tpu_kv_caches[layer_name]
+        sliced_device_tensor = host_tensor[host_indices].to(tpu_device)
+        _insert_blocks_to_tpu(sliced_device_tensor, device_tensor, device_indices)
+
+
+def d2h_copy_blocks(
+    cpu_kv_caches: dict[torch.Tensor],
+    tpu_kv_caches: dict[torch.Tensor],
+    cpu_block_ids: list[int],
+    tpu_block_ids: list[int],
+    tpu_device: str,
+) -> None:
+    """Copy kv blocks from device to host xfer buffer."""
+    if not cpu_block_ids or not tpu_block_ids or len(cpu_block_ids) != len(tpu_block_ids):
+        return
+    device_indices, host_indices = _make_src_and_dst_indices(src_block_ids=tpu_block_ids,
+                                                    dst_block_ids=cpu_block_ids,
+                                                    src_device=tpu_device,
+                                                    dst_device="cpu")
+    for layer_name in cpu_kv_caches:
+        host_tensor = cpu_kv_caches[layer_name]
+        device_tensor = tpu_kv_caches[layer_name]
+        _swap_out_tpu_blocks(tpu_cache=device_tensor,
+                            cpu_cache=host_tensor,
+                            tpu_block_indices=device_indices,
+                            cpu_block_indices=host_indices)

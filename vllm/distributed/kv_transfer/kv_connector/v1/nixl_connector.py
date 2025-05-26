@@ -59,6 +59,7 @@ class _NIXL_SUPPORTED_XPU:
     _support_dict = {
         "cuda": ("cuda",),
         "tpu": ("cpu",),
+        "xpu": ("cpu",),
     }
 
     @classmethod
@@ -598,6 +599,11 @@ class NixlConnectorWorker:
             # (num_blocks, block_size, num_kv_heads * 2, head_size)
             self.num_blocks = first_kv_cache.shape[0]
             block_rank = 3  # [block_size, kv_heads, head_dim]
+        elif self.device_type == "xpu":
+            # check if MLA is used
+            # (2, num_blocks, block_size, kv_heads, head_dim)
+            self.num_blocks = first_kv_cache.shape[1]
+            block_rank = 4  # [block_size, kv_heads, head_dim]
         elif self.device_type == "cuda":
             if use_mla:
                 # MLA case.
