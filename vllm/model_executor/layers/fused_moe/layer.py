@@ -41,6 +41,7 @@ if current_platform.is_cuda_alike():
         from .pplx_prepare_finalize import PplxPrepareAndFinalize
 else:
     fused_experts = None  # type: ignore
+    FusedMoEPermuteExpertsUnpermute = None  # type: ignore
     FusedMoEPrepareAndFinalize = None  # type: ignore
 if is_rocm_aiter_moe_enabled():
     from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (  # noqa: E501
@@ -418,10 +419,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             shuffle_weights)
 
         if self.rocm_aiter_moe_enabled:
-            # use 2stage ck moe layout
-            shuffled_w13, shuffled_w2 = shuffle_weights(layer.w13_weight.data,
-                                                        layer.w2_weight.data,
-                                                        layout=(32, 32))
+            shuffled_w13, shuffled_w2 = shuffle_weights(
+                layer.w13_weight.data, layer.w2_weight.data)
 
             layer.w13_weight.data = shuffled_w13
             layer.w2_weight.data = shuffled_w2
