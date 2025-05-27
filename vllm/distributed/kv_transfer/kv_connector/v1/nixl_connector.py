@@ -48,6 +48,15 @@ except ImportError:
     logger.warning("NIXL is not available")
     NixlWrapper = None
 
+def log_enter_exit(func):
+    import functools
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        print(f"Enter {func.__name__}")
+        result = func(*args, **kwargs)
+        print(f"Exit {func.__name__}")
+        return result
+    return wrapper
 
 class _NIXL_SUPPORTED_XPU:
     """
@@ -137,7 +146,7 @@ class NixlConnector(KVConnectorBase_V1):
     ############################################################
     # Scheduler Side Methods
     ############################################################
-
+    @log_enter_exit
     def get_num_new_matched_tokens(
             self, request: "Request",
             num_computed_tokens: int) -> tuple[int, bool]:
@@ -145,6 +154,7 @@ class NixlConnector(KVConnectorBase_V1):
         return self.connector_scheduler.get_num_new_matched_tokens(
             request, num_computed_tokens)
 
+    @log_enter_exit
     def update_state_after_alloc(self, request: "Request",
                                  blocks: "KVCacheBlocks",
                                  num_external_tokens: int):
@@ -152,6 +162,7 @@ class NixlConnector(KVConnectorBase_V1):
         return self.connector_scheduler.update_state_after_alloc(
             request, blocks, num_external_tokens)
 
+    @log_enter_exit
     def build_connector_meta(
         self,
         scheduler_output: SchedulerOutput,
@@ -159,6 +170,7 @@ class NixlConnector(KVConnectorBase_V1):
         assert self.connector_scheduler is not None
         return self.connector_scheduler.build_connector_meta(scheduler_output)
 
+    @log_enter_exit
     def request_finished(
         self,
         request: "Request",
@@ -170,23 +182,25 @@ class NixlConnector(KVConnectorBase_V1):
     ############################################################
     # Worker Side Methods
     ############################################################
+    @log_enter_exit
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         assert self.connector_worker is not None
         self.connector_worker.register_kv_caches(kv_caches)
 
+    @log_enter_exit
     def set_host_xfer_buffer_ops(self,
                                  d2h_copy_blocks: Callable,
                                  h2d_copy_blocks: Callable):
         assert self.connector_worker is not None
         self.connector_worker.set_host_xfer_buffer_ops(d2h_copy_blocks,
                                                        h2d_copy_blocks)
-
+    @log_enter_exit
     def get_finished(self,
                      finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
         """Get the finished recving and sending requests."""
         assert self.connector_worker is not None
         return self.connector_worker.get_finished()
-
+    @log_enter_exit
     def start_load_kv(self, forward_context: "ForwardContext",
                       **kwargs) -> None:
         assert self.connector_worker is not None
@@ -201,7 +215,7 @@ class NixlConnector(KVConnectorBase_V1):
                       attn_metadata: "AttentionMetadata", **kwargs) -> None:
         """NixlConnector does not save explicitly."""
         pass
-
+    @log_enter_exit
     def wait_for_save(self):
         assert self.connector_worker is not None
         assert isinstance(self._connector_metadata, NixlConnectorMetadata)
