@@ -749,7 +749,7 @@ class NixlConnectorWorker:
         """copy kv from device to host buffer."""
         if not self.use_host_buffer:
             return
-        assert self.h2d_copy_blocks is not None
+        assert self.d2h_copy_blocks is not None
 
         for req_id, meta in metadata.requests.items():
             # local prefill requests only
