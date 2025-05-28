@@ -11,9 +11,10 @@ import torch_xla.debug.profiler as xp
 import torch_xla.runtime as xr
 
 import vllm.envs as envs
-from vllm.config import ParallelConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
+from vllm.distributed.kv_transfer import ensure_kv_transfer_initialized
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
@@ -24,7 +25,6 @@ from vllm.v1.kv_cache_interface import (AttentionSpec, KVCacheConfig,
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.utils import bind_kv_cache, report_usage_stats
 from vllm.v1.worker.tpu_model_runner import TPUModelRunner
-from vllm.distributed.kv_transfer import ensure_kv_transfer_initialized
 
 logger = init_logger(__name__)
 
@@ -96,8 +96,7 @@ class TPUWorker:
         torch.set_default_dtype(self.model_config.dtype)
 
         # Initialize the distributed environment.
-        init_tpu_worker_distributed_environment(self.vllm_config,
-                                                self.rank,
+        init_tpu_worker_distributed_environment(self.vllm_config, self.rank,
                                                 self.distributed_init_method,
                                                 self.local_rank)
 

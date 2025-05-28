@@ -1,16 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 import contextlib
+import copy
 import math
 import threading
 import time
 import uuid
-import enum
-import os
-import copy
 from collections import defaultdict
 from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Optional, Callable
+from typing import TYPE_CHECKING, Any, Callable, Optional
 
 import msgspec
 import torch
@@ -24,11 +22,10 @@ from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size,
     get_tp_group)
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.utils import make_zmq_path, make_zmq_socket, round_down
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.request import RequestStatus
-
-from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
@@ -57,21 +54,19 @@ class _NIXL_SUPPORTED_XPU:
     # {xPU: tuple of supported kv buffer types}
     # TODO: "cpu" xfer buffer for cuda
     _support_dict = {
-        "cuda": ("cuda",),
-        "tpu": ("cpu",),
+        "cuda": ("cuda", ),
+        "tpu": ("cpu", ),
     }
 
     @classmethod
-    def is_supported_xpu(cls,
-                         device_type: str) -> bool:
+    def is_supported_xpu(cls, device_type: str) -> bool:
         return device_type in cls._support_dict
 
     @classmethod
-    def is_supported_kv_buffer(cls,
-                               device_type: str,
+    def is_supported_kv_buffer(cls, device_type: str,
                                kv_buffer_type: str) -> bool:
-        return (device_type in cls._support_dict and
-                kv_buffer_type in cls._support_dict[device_type])
+        return (device_type in cls._support_dict
+                and kv_buffer_type in cls._support_dict[device_type])
 
 
 class NixlAgentMetadata(
@@ -173,8 +168,7 @@ class NixlConnector(KVConnectorBase_V1):
         assert self.connector_worker is not None
         self.connector_worker.register_kv_caches(kv_caches)
 
-    def set_host_xfer_buffer_ops(self,
-                                 d2h_copy_blocks: Callable,
+    def set_host_xfer_buffer_ops(self, d2h_copy_blocks: Callable,
                                  h2d_copy_blocks: Callable):
         assert self.connector_worker is not None
         self.connector_worker.set_host_xfer_buffer_ops(d2h_copy_blocks,
@@ -278,7 +272,7 @@ class NixlConnectorScheduler:
             full_block_ids = (block_ids if all_full else block_ids[:-1])
             # TODO: skip the blocks that are already in the host xfer buffer.
             # Currently, the host xfer buffer block is 1-to-1 mapped to device
-            # kv blocks, so host blocks won't be flushed as long as its device 
+            # kv blocks, so host blocks won't be flushed as long as its device
             # block is not overwritten; and it will be safe to skip saving them
             # to host xfer buffer.
             if full_block_ids:
@@ -289,7 +283,7 @@ class NixlConnectorScheduler:
                 if all(p in params for p in ("remote_engine_id", "remote_host",
                                              "remote_port")):
                     # NOTE: if num_external_tokens is 0 here,
-                    # we have less than block_size tokens to pull 
+                    # we have less than block_size tokens to pull
                     # after subtracting the local prefix cache hit.
                     # The remote only sends fully computed blocks, so there is
                     # nothing to transfer but we still need to notify the
@@ -389,8 +383,7 @@ class NixlConnectorWorker:
 
         self.device_type = current_platform.device_type
         if not _NIXL_SUPPORTED_XPU.is_supported_xpu(
-            device_type=self.device_type
-        ):
+                device_type=self.device_type):
             logger.error("%s is not supported.", self.device_type)
             raise RuntimeError(f"{self.device_type} is not supported.")
 
@@ -412,13 +405,11 @@ class NixlConnectorWorker:
         self.kv_buffer_device: str = \
             vllm_config.kv_transfer_config.kv_buffer_device.strip().lower()
         if not _NIXL_SUPPORTED_XPU.is_supported_kv_buffer(
-            device_type=self.device_type,
-            kv_buffer_type=self.kv_buffer_device
-        ):
+                device_type=self.device_type,
+                kv_buffer_type=self.kv_buffer_device):
             raise RuntimeError(
                 f"{self.device_type} with {self.kv_buffer_device} kv_buffer "
-                "is not supported."
-            )
+                "is not supported.")
         self.device_kv_caches: dict[str, torch.Tensor] = {}
         self.device = None
 
@@ -433,8 +424,7 @@ class NixlConnectorWorker:
         else:
             raise RuntimeError(
                 f"{self.device_type} with {self.kv_buffer_device} kv_buffer "
-                "is not supported."
-            )
+                "is not supported.")
 
         # Note: host xfer buffer ops when use_host_buffer is True
         self.d2h_copy_blocks: Optional[Callable] = None
@@ -543,9 +533,8 @@ class NixlConnectorWorker:
             logger.debug("NIXL handshake: add agent took: %s",
                          setup_agent_time - got_metadata_time)
 
-    def initialize_host_xfer_buffer(self,
-                                    kv_caches: dict[str, torch.Tensor]
-    ) -> None:
+    def initialize_host_xfer_buffer(
+            self, kv_caches: dict[str, torch.Tensor]) -> None:
         """Initialize transfer buffer in CPU mem for xPUs (e.g., tpu)"""
         xfer_buffers: dict[str, torch.Tensor] = {}
         try:
@@ -561,8 +550,7 @@ class NixlConnectorWorker:
 
         self.host_xfer_buffers = xfer_buffers
 
-    def set_host_xfer_buffer_ops(self,
-                                 d2h_copy_blocks: Callable,
+    def set_host_xfer_buffer_ops(self, d2h_copy_blocks: Callable,
                                  h2d_copy_blocks: Callable):
         """Assign copy (d2h, h2d) operations when host buffer is used."""
         assert self.use_host_buffer
@@ -579,15 +567,13 @@ class NixlConnectorWorker:
             self.initialize_host_xfer_buffer(kv_caches=kv_caches)
             assert len(self.host_xfer_buffers) == len(kv_caches), (
                 f"host_buffer: {len(self.host_xfer_buffers)}, "
-                f"kv_caches: {len(kv_caches)}"
-            )
+                f"kv_caches: {len(kv_caches)}")
             xfer_buffers = self.host_xfer_buffers
         else:
             xfer_buffers = kv_caches
             assert not self.host_xfer_buffers, (
                 "host_xfer_buffer should not be initialized when "
-                f"kv_buffer_device is {self.kv_buffer_device}"
-            )
+                f"kv_buffer_device is {self.kv_buffer_device}")
 
         # TODO(tms): Find a more robust way to detect and handle
         # xPU / attn. backend, and MLA
@@ -617,9 +603,8 @@ class NixlConnectorWorker:
 
         logger.debug(
             "Registering KV_Caches. use_mla: %s, kv_buffer_device: %s, "
-            "use_host_buffer: %s, shape %s",
-            use_mla, self.kv_buffer_device, self.use_host_buffer,
-            first_kv_cache.shape)
+            "use_host_buffer: %s, shape %s", use_mla, self.kv_buffer_device,
+            self.use_host_buffer, first_kv_cache.shape)
         logger.debug("num_blocks: %s, block_shape: %s", self.num_blocks,
                      block_shape)
         logger.debug("Per layer kv cache size: %s", first_kv_cache.shape)
@@ -637,11 +622,8 @@ class NixlConnectorWorker:
         # (roughly 8KB vs 5KB).
         for cache_or_caches in xfer_buffers.values():
             # Normalize to always be a list of caches
-            cache_list = (
-                [cache_or_caches]
-                if use_mla or self.use_host_buffer
-                else cache_or_caches
-            )
+            cache_list = ([cache_or_caches] if use_mla or self.use_host_buffer
+                          else cache_or_caches)
             for cache in cache_list:
                 base_addr = cache.data_ptr()
                 region_len = self.num_blocks * self.block_len
@@ -755,15 +737,11 @@ class NixlConnectorWorker:
             if not meta.do_remote_prefill:
                 return
             local_block_ids = meta.local_block_ids
-            self.h2d_copy_blocks(self.host_xfer_buffers,
-                                 self.device_kv_caches,
-                                 local_block_ids,
-                                 local_block_ids,
-                                 self.device)
+            self.h2d_copy_blocks(self.host_xfer_buffers, self.device_kv_caches,
+                                 local_block_ids, local_block_ids, self.device)
             logger.debug(
                 "synced recved kv of request[%s] to device kv buffer,"
-                "local_block_ids: %s. ",
-                req_id,
+                "local_block_ids: %s. ", req_id,
                 ",".join(map(str, meta.local_block_ids)))
         return
 
@@ -779,14 +757,11 @@ class NixlConnectorWorker:
                 continue
             # blocking
             logger.debug(
-                "save_load_kv for request[%s] to host xfer buffer." 
-                "local_block_ids: %s. ",
-                req_id,
+                "save_load_kv for request[%s] to host xfer buffer."
+                "local_block_ids: %s. ", req_id,
                 ",".join(map(str, meta.local_block_ids)))
-            self.d2h_copy_blocks(self.host_xfer_buffers,
-                                 self.device_kv_caches,
-                                 meta.local_block_ids,
-                                 meta.local_block_ids,
+            self.d2h_copy_blocks(self.host_xfer_buffers, self.device_kv_caches,
+                                 meta.local_block_ids, meta.local_block_ids,
                                  self.device)
         return
 

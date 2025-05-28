@@ -2,6 +2,7 @@
 
 import argparse
 import itertools
+import logging
 import os
 import uuid
 from contextlib import asynccontextmanager
@@ -9,9 +10,6 @@ from contextlib import asynccontextmanager
 import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse
-
-import logging
-
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
