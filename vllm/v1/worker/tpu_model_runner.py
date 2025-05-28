@@ -786,7 +786,8 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 # Return empty ModelRunnerOutput if there's no work to do.
                 return EMPTY_MODEL_RUNNER_OUTPUT
 
-            return self.kv_connector_no_forward(scheduler_output)
+            return self.kv_connector_no_forward(scheduler_output,
+                                                self.vllm_config)
 
         if self.is_multimodal_model:
             # Run the multimodal encoder if any.
@@ -1564,7 +1565,7 @@ def _make_src_and_dst_indices(
     dst_block_ids: list[int],
     src_device: Union[torch.device, str],
     dst_device: Union[torch.device, str],
-) -> Optional[tuple[torch.Tensor, torch.Tensor]]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     src_indices = torch.tensor(src_block_ids,
                                device=src_device,
                                dtype=torch.int64)
@@ -1598,8 +1599,8 @@ def _swap_out_tpu_blocks(
 
 
 def h2d_copy_blocks(
-    cpu_kv_caches: dict[torch.Tensor],
-    tpu_kv_caches: dict[torch.Tensor],
+    cpu_kv_caches: dict[str, torch.Tensor],
+    tpu_kv_caches: dict[str, torch.Tensor],
     cpu_block_ids: list[int],
     tpu_block_ids: list[int],
     tpu_device: str,
@@ -1622,8 +1623,8 @@ def h2d_copy_blocks(
 
 
 def d2h_copy_blocks(
-    cpu_kv_caches: dict[torch.Tensor],
-    tpu_kv_caches: dict[torch.Tensor],
+    cpu_kv_caches: dict[str, torch.Tensor],
+    tpu_kv_caches: dict[str, torch.Tensor],
     cpu_block_ids: list[int],
     tpu_block_ids: list[int],
     tpu_device: str,

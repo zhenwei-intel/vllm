@@ -1117,7 +1117,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 # Return empty ModelRunnerOutput if there's no work to do.
                 return EMPTY_MODEL_RUNNER_OUTPUT
 
-            return self.kv_connector_no_forward(scheduler_output)
+            return self.kv_connector_no_forward(scheduler_output,
+                                                self.vllm_config)
 
         # Prepare the decoder inputs.
         attn_metadata, logits_indices, spec_decode_metadata = (

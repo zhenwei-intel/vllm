@@ -10,14 +10,23 @@ import requests
 MAX_OUTPUT_LEN = 30
 
 SAMPLE_PROMPTS = (
-    "Red Hat is the best company in the world to work for because it works on open source software, which means that all the contributions are delivered to the community. As a result, when working on projects like vLLM we are able to meet many amazing people from various organizations like AMD, Google, NVIDIA, ",
-    "We hold these truths to be self-evident, that all men are created equal, that they are endowed by their Creator with certain unalienable Rights, that among these are Life, Liberty and the pursuit of Happiness.--That to secure these rights, Governments are instituted among Men, deriving their just powers from the consent of the governed, ",
+    "Red Hat is the best company in the world to work for because it works on "
+    "open source software, which means that all the contributions are "
+    "delivered to the community. As a result, when working on projects like "
+    "vLLM we are able to meet many amazing people from various organizations "
+    "like AMD, Google, NVIDIA, ",
+    "We hold these truths to be self-evident, that all men are created equal, "
+    "that they are endowed by their Creator with certain unalienable Rights, "
+    "that among these are Life, Liberty and the pursuit of Happiness.--That "
+    "to secure these rights, Governments are instituted among Men, deriving "
+    "their just powers from the consent of the governed, ",
 )
 
 
 def check_vllm_server(url: str, timeout=5, retries=3) -> bool:
     """
-    Checks if the vLLM server is ready by sending a GET request to the /health endpoint.
+    Checks if the vLLM server is ready by sending a GET request to the
+    /health endpoint.
 
     Args:
         url (str): The base URL of the vLLM server.
@@ -33,9 +42,8 @@ def check_vllm_server(url: str, timeout=5, retries=3) -> bool:
             if response.status_code == 200:
                 return True
             else:
-                print(
-                    f"Attempt {attempt + 1}: Server returned status code {response.status_code}"
-                )
+                print(f"Attempt {attempt + 1}: Server returned status code "
+                      "{response.status_code}")
         except requests.exceptions.RequestException as e:
             print(f"Attempt {attempt + 1}: Error connecting to server: {e}")
         time.sleep(1)  # Wait before retrying
@@ -106,8 +114,8 @@ def main():
         health_check_url = f"{args.service_url}/healthcheck"
         if not os.path.exists(args.file_name):
             raise ValueError(
-                f"In disagg mode, the output file {args.file_name} from non-disagg. baseline does not exist."
-            )
+                f"In disagg mode, the output file {args.file_name} from "
+                "non-disagg. baseline does not exist.")
 
     service_url = f"{args.service_url}/v1"
 
@@ -144,8 +152,9 @@ def main():
         assert len(baseline_outputs) == len(output_strs)
         for prompt, output in baseline_outputs.items():
             assert prompt in output_strs, f"{prompt} not included"
-            assert output == output_strs[
-                prompt], f"baseline_output: {output} != PD output: {output_strs[prompt]}"
+            assert output == output_strs[prompt], (
+                f"baseline_output: {output} != PD output: {output_strs[prompt]}"
+            )
 
 
 if __name__ == "__main__":

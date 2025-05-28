@@ -5,6 +5,7 @@ Define KV connector functionality mixin for model runners.
 import copy
 from typing import TYPE_CHECKING, Optional
 
+from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group)
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
@@ -21,10 +22,10 @@ logger = init_logger(__name__)
 # Defined as a kv connector functionality mixin for ModelRunner (GPU, TPU)
 class KVConnectorModelRunnerMixin:
 
-    def kv_connector_no_forward(
-            self, scheduler_output: "SchedulerOutput") -> ModelRunnerOutput:
+    def kv_connector_no_forward(self, scheduler_output: "SchedulerOutput",
+                                vllm_config: VllmConfig) -> ModelRunnerOutput:
         # KV send/recv even if no work to do.
-        with set_forward_context(None, self.vllm_config):
+        with set_forward_context(None, vllm_config):
             self.maybe_setup_kv_connector(scheduler_output)
             finished_sending, finished_recving = (
                 self.get_finished_kv_transfers(scheduler_output))
