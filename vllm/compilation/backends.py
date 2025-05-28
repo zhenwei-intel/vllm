@@ -433,7 +433,8 @@ class VllmBackend:
         # them, e.g. backbone (default), eagle_head, etc.
         self.prefix = prefix or model_tag
 
-        global_graph_pool = current_platform.get_global_graph_pool()
+        if not current_platform.is_xpu():
+            global_graph_pool = current_platform.get_global_graph_pool()
 
         # TODO: in the future, if we want to use multiple
         # streams, it might not be safe to share a global pool.

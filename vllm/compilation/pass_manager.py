@@ -23,6 +23,11 @@ from .vllm_inductor_pass import VllmInductorPass
 
 logger = init_logger(__name__)
 
+try:
+    from .fusion import FusionPass
+except AttributeError:
+    logger.warning("import FusionPass error.")
+
 
 class PostGradPassManager(CustomGraphPass):
     """
@@ -61,7 +66,7 @@ class PostGradPassManager(CustomGraphPass):
             if self.pass_config.enable_async_tp:
                 self.passes += [AsyncTPPass(config)]
 
-        if self.pass_config.enable_fusion:
+        if self.pass_config.enable_fusion and not current_platform.is_xpu():
             self.passes += [FusionPass.instance(config)]
             self.passes += [ActivationQuantFusionPass(config)]
 
