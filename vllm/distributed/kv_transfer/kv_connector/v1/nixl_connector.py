@@ -66,7 +66,7 @@ class _NIXL_SUPPORTED_XPU:
     # {xPU: tuple of supported kv buffer types}
     # TODO: "cpu" xfer buffer for cuda
     _support_dict = {
-        "cuda": ("cuda",),
+        "cuda": ("cuda", "cpu"),
         "tpu": ("cpu",),
         "xpu": ("cpu",),
     }

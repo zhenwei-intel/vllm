@@ -1929,6 +1929,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.attn_backends.append(attn_backend_i)
             self.attn_metadata_builders.append(attn_metadata_builder_i)
 
+
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         """
         Initialize KV cache based on `kv_cache_config`.
@@ -1979,6 +1980,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         if has_kv_transfer_group():
             get_kv_transfer_group().register_kv_caches(kv_caches)
+            get_kv_transfer_group().set_host_xfer_buffer_ops(d2h_copy_blocks, h2d_copy_blocks)
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         """
@@ -2022,3 +2024,82 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     f"Unknown attention type: {attn_module.attn_type}")
 
         return kv_cache_spec
+
+
+
+def _make_src_and_dst_indices(
+    src_block_ids: list[int],
+    dst_block_ids: list[int],
+    src_device: Union[torch.device, str],
+    dst_device: Union[torch.device, str],
+) -> Optional[tuple[torch.Tensor, torch.Tensor]]:
+    src_indices = torch.tensor(src_block_ids,
+                               device=src_device,
+                               dtype=torch.int64)
+    dst_indices = torch.tensor(dst_block_ids,
+                               device=dst_device,
+                               dtype=torch.int64)
+    return src_indices, dst_indices
+
+def _insert_blocks_to_gpu(
+    src_cache: torch.Tensor,
+    gpu_cache: torch.Tensor,
+    gpu_block_indices: torch.Tensor,
+) -> None:
+    # No buffer donor op for GPU, just assign
+    gpu_cache[:, gpu_block_indices] = src_cache
+
+def _swap_out_gpu_blocks(
+    gpu_cache: torch.Tensor,
+    cpu_cache: torch.Tensor,
+    gpu_block_indices: torch.Tensor,
+    cpu_block_indices: torch.Tensor,
+) -> None:
+    """ gpu blocks to cpu blocks"""
+    _gpu_cache = gpu_cache[:, gpu_block_indices] # this will occupy more gpu memeory 
+    cpu_cache[:, cpu_block_indices] = _gpu_cache.cpu()
+
+def h2d_copy_blocks(
+    cpu_kv_caches: dict[torch.Tensor],
+    gpu_kv_caches: dict[torch.Tensor],
+    cpu_block_ids: list[int],
+    gpu_block_ids: list[int],
+    gpu_device: str,
+) -> None:
+    """Copy kv blocks from host xfer buffer to device."""
+    if not cpu_block_ids or not gpu_block_ids or len(cpu_block_ids) != len(gpu_block_ids):
+        return
+    host_indices, device_indices = _make_src_and_dst_indices(
+        src_block_ids=cpu_block_ids,
+        dst_block_ids=gpu_block_ids,
+        src_device="cpu",
+        dst_device=gpu_device)
+    for layer_name in cpu_kv_caches:
+        host_tensor = cpu_kv_caches[layer_name]
+        device_tensor = gpu_kv_caches[layer_name]
+        sliced_device_tensor = host_tensor[:, host_indices].to(gpu_device)
+        _insert_blocks_to_gpu(sliced_device_tensor, device_tensor, device_indices)
+
+def d2h_copy_blocks(
+    cpu_kv_caches: dict[torch.Tensor],
+    gpu_kv_caches: dict[torch.Tensor],
+    cpu_block_ids: list[int],
+    gpu_block_ids: list[int],
+    gpu_device: str,
+) -> None:
+    """Copy kv blocks from device to host xfer buffer."""
+    if not cpu_block_ids or not gpu_block_ids or len(cpu_block_ids) != len(gpu_block_ids):
+        return
+    device_indices, host_indices = _make_src_and_dst_indices(
+        src_block_ids=gpu_block_ids,
+        dst_block_ids=cpu_block_ids,
+        src_device=gpu_device,
+        dst_device="cpu")
+    for layer_name in cpu_kv_caches:
+        host_tensor = cpu_kv_caches[layer_name]
+        device_tensor = gpu_kv_caches[layer_name]
+        _swap_out_gpu_blocks(
+            gpu_cache=device_tensor,
+            cpu_cache=host_tensor,
+            gpu_block_indices=device_indices,
+            cpu_block_indices=host_indices)
