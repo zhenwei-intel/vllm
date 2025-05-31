@@ -624,7 +624,8 @@ class NixlConnectorWorker:
         # (roughly 8KB vs 5KB).
         for cache_or_caches in xfer_buffers.values():
             # Normalize to always be a list of caches
-            cache_list = ([cache_or_caches] if use_mla or self.use_host_buffer
+            cache_list = ([cache_or_caches] if use_mla or
+                          self.device_type == "tpu"
                           else cache_or_caches)
             for cache in cache_list:
                 base_addr = cache.data_ptr()
