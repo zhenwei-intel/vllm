@@ -1396,15 +1396,15 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.vllm_config.compilation_config.static_forward_context,
             self.kv_caches)
 
-        if has_kv_transfer_group():
-            get_kv_transfer_group().register_kv_caches(kv_caches)
-            get_kv_transfer_group().set_host_xfer_buffer_ops(
-                d2h_copy_blocks, h2d_copy_blocks)
-
         if self.use_spmd:
             # Shard KV Cache
             for cache in self.kv_caches:
                 xs.mark_sharding(cache, self.mesh, (None, 'x', None, None))
+
+        if has_kv_transfer_group():
+            get_kv_transfer_group().register_kv_caches(kv_caches)
+            get_kv_transfer_group().set_host_xfer_buffer_ops(
+                d2h_copy_blocks, h2d_copy_blocks)
 
     def reset_dynamo_cache(self):
         if self.is_multimodal_model:
