@@ -2,6 +2,8 @@
 
 ## Environment Setup
 
+docker image: `artifactory-kfs.habana-labs.com/docker-local/1.21.0/ubuntu22.04/habanalabs/pytorch-installer-2.6.0   1.21.0-517`
+
 1. Log in to CT4.
 2. Set the proxy: `export https_proxy=http://child-igk.intel.com:912`
 3. Navigate to the project directory and install dependencies:
@@ -28,15 +30,3 @@ You can find the scripts in the following path on CT4: `/home/jarvis3@user/lzw/v
 4. Wait for model initialization to complete on both CT4 and CT3.
 5. On **CT4**, run: `bash start_proxy.sh`
 6. On **CT4**, verify the output: `bash curl.sh`
-
-## Commands to run baidu/tencent case
-
-```bash
-#baidu
-
-python3 benchmarks/benchmark_serving.py --backend vllm --model /software/data/models/DeepSeek-R1-BF16-w8afp8-static-no-ste-G2/ --dataset-name sonnet --request-rate inf --port 8868 --sonnet-input-len 2000 --sonnet-output-len 1000 --sonnet-prefix-len 100 --trust-remote-code --max-concurrency 256 --num-prompts 256 --ignore-eos --burstiness 1000 --dataset-path benchmarks/sonnet.txt
-
-#tencent
-
-python3 benchmarks/benchmark_serving.py --backend vllm --model /software/data/models/DeepSeek-R1-BF16-w8afp8-static-no-ste-G2/ --dataset-name sonnet --request-rate inf --port 8868 --sonnet-input-len 13000 --sonnet-output-len 1000 --sonnet-prefix-len 100 --trust-remote-code --max-concurrency 256 --num-prompts 256 --ignore-eos --burstiness 1000 --dataset-path benchmarks/sonnet.txt  
-```
