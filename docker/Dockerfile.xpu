@@ -19,9 +19,11 @@ RUN apt-get update -y && \
     libgl1 \
     lsb-release \
     numactl \
+    python3.10-dev \
     wget
 
 RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.10 1
+RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.10 1
 
 RUN apt install -y libze1 libze-dev libze-intel-gpu1 intel-opencl-icd libze-intel-gpu-raytracing
 
