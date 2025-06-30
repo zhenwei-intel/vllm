@@ -83,6 +83,11 @@ class XPUPlatform(Platform):
         return "vllm.compilation.cuda_piecewise_backend.CUDAPiecewiseBackend"  # noqa
 
     @classmethod
+    def get_vit_attn_backend(cls, support_fa: bool = False) -> _Backend:
+        return _Backend.IPEX
+
+
+    @classmethod
     def inference_mode(cls):
         return torch.no_grad()
 
