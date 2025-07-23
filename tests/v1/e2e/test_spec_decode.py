@@ -90,7 +90,7 @@ def test_ngram_correctness(
         m.setenv("VLLM_USE_V1", "1")
         test_prompts = get_test_prompts(mm_enabled=False)
 
-        ref_llm = LLM(model=model_name, max_model_len=1024)
+        ref_llm = LLM(model=model_name, max_model_len=1024, enforce_eager=True, block_size=32, dtype="float16")
         ref_outputs = ref_llm.chat(test_prompts, sampling_config)
         del ref_llm
         torch.cuda.empty_cache()
@@ -105,6 +105,10 @@ def test_ngram_correctness(
                 "num_speculative_tokens": 3,
             },
             max_model_len=1024,
+            enforce_eager=True,
+            block_size=64,
+            dtype="float16",
+            gpu_memory_utilization=0.6,
         )
         spec_outputs = spec_llm.chat(test_prompts, sampling_config)
         matches = 0
@@ -191,7 +195,12 @@ def test_eagle_correctness(
 
         ref_llm = LLM(model=model_name,
                       max_model_len=2048,
-                      tensor_parallel_size=tp_size)
+                      tensor_parallel_size=tp_size,
+                      enforce_eager=True,
+                      block_size=64,
+                      dtype="float16",
+                      gpu_memory_utilization=0.6,
+                      )
         ref_outputs = ref_llm.chat(test_prompts, sampling_config)
         del ref_llm
         torch.cuda.empty_cache()
@@ -207,6 +216,10 @@ def test_eagle_correctness(
                 "num_speculative_tokens": 3,
                 "max_model_len": 2048,
             },
+            enforce_eager=True,
+            block_size=64,
+            dtype="float16",
+            gpu_memory_utilization=0.6,
             max_model_len=2048,
         )
         spec_outputs = spec_llm.chat(test_prompts, sampling_config)
