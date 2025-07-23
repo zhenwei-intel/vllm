@@ -24,7 +24,8 @@ from .compiler_interface import (CompilerInterface, EagerAdaptor,
                                  InductorAdaptor, InductorStandaloneAdaptor)
 from .counter import compilation_counter
 from .inductor_pass import InductorPass
-from .pass_manager import PostGradPassManager
+if not current_platform.is_xpu():
+    from .pass_manager import PostGradPassManager
 
 logger = init_logger(__name__)
 
