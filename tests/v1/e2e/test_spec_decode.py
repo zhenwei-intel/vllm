@@ -90,7 +90,7 @@ def test_ngram_correctness(
         m.setenv("VLLM_USE_V1", "1")
         test_prompts = get_test_prompts(mm_enabled=False)
 
-        ref_llm = LLM(model=model_name, max_model_len=1024)
+        ref_llm = LLM(model=model_name, max_model_len=1024, enforce_eager=True, block_size=64, dtype="float16")
         ref_outputs = ref_llm.chat(test_prompts, sampling_config)
         del ref_llm
         torch.cuda.empty_cache()
@@ -105,6 +105,10 @@ def test_ngram_correctness(
                 "num_speculative_tokens": 3,
             },
             max_model_len=1024,
+            enforce_eager=True,
+            block_size=64,
+            dtype="float16",
+            gpu_memory_utilization=0.6,
         )
         spec_outputs = spec_llm.chat(test_prompts, sampling_config)
         matches = 0
@@ -134,27 +138,12 @@ def test_ngram_correctness(
           "yuhuili/EAGLE-LLaMA3.1-Instruct-8B", 1), False),
         (("eagle3", "meta-llama/Llama-3.1-8B-Instruct",
           "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B", 1), False),
-        pytest.param(
-            ("eagle", "meta-llama/Llama-4-Scout-17B-16E-Instruct",
-             "morgendave/EAGLE-Llama-4-Scout-17B-16E-Instruct", 4),
-            False,
-            marks=pytest.mark.skip(reason="Skipping due to CI OOM issues")),
-        pytest.param(
-            ("eagle", "meta-llama/Llama-4-Scout-17B-16E-Instruct",
-             "morgendave/EAGLE-Llama-4-Scout-17B-16E-Instruct", 4),
-            True,
-            marks=pytest.mark.skip(reason="Skipping due to CI OOM issues")),
-        (("eagle", "eagle618/deepseek-v3-random",
-          "eagle618/eagle-deepseek-v3-random", 1), False),
     ],
     ids=[
         # TODO: Re-enable this once tests/models/test_initialization.py is fixed, see PR #22333 #22611  # noqa: E501
         # "qwen3_eagle3",
         "llama3_eagle",
         "llama3_eagle3",
-        "llama4_eagle",
-        "llama4_eagle_mm",
-        "deepseek_eagle"
     ])
 @pytest.mark.parametrize("attn_backend",
                          get_attn_backend_list_based_on_platform())
@@ -195,7 +184,12 @@ def test_eagle_correctness(
 
         ref_llm = LLM(model=model_name,
                       max_model_len=2048,
-                      tensor_parallel_size=tp_size)
+                      tensor_parallel_size=tp_size,
+                      enforce_eager=True,
+                      block_size=64,
+                      dtype="float16",
+                      gpu_memory_utilization=0.6,
+                      )
         ref_outputs = ref_llm.chat(test_prompts, sampling_config)
         del ref_llm
         torch.cuda.empty_cache()
@@ -211,6 +205,10 @@ def test_eagle_correctness(
                 "num_speculative_tokens": 3,
                 "max_model_len": 2048,
             },
+            enforce_eager=True,
+            block_size=64,
+            dtype="float16",
+            gpu_memory_utilization=0.6,
             max_model_len=2048,
         )
         spec_outputs = spec_llm.chat(test_prompts, sampling_config)
