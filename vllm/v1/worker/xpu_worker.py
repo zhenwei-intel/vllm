@@ -14,6 +14,7 @@ from vllm.platforms import current_platform
 from vllm.v1.worker.gpu_worker import (Worker,
                                        init_worker_distributed_environment)
 from vllm.v1.worker.xpu_model_runner import XPUModelRunner
+from vllm.distributed.kv_transfer import ensure_kv_transfer_initialized
 
 logger = init_logger(__name__)
 
