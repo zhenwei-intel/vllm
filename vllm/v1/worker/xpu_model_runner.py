@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import TYPE_CHECKING, Optional, cast, Union
+from typing import TYPE_CHECKING, Union, Literal
 
 import torch
 
@@ -8,12 +8,9 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from vllm.v1.spec_decode.eagle import EagleProposer
-from vllm.v1.kv_cache_interface import (AttentionSpec, FullAttentionSpec,
-                                        KVCacheConfig, KVCacheSpec,
-                                        SlidingWindowSpec)
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group)
-from vllm.v1.utils import bind_kv_cache
 
 if TYPE_CHECKING:
     pass
@@ -59,14 +56,14 @@ class XPUModelRunner(GPUModelRunner):
 
         if has_kv_transfer_group():
             get_kv_transfer_group().register_kv_caches(kv_caches)
-            get_kv_transfer_group().set_host_xfer_buffer_ops(d2h_copy_blocks, h2d_copy_blocks)
+            get_kv_transfer_group().set_host_xfer_buffer_ops(copy_kv_blocks)
 
 def _make_src_and_dst_indices(
     src_block_ids: list[int],
     dst_block_ids: list[int],
     src_device: Union[torch.device, str],
     dst_device: Union[torch.device, str],
-) -> Optional[tuple[torch.Tensor, torch.Tensor]]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     src_indices = torch.tensor(src_block_ids,
                                device=src_device,
                                dtype=torch.int64)
@@ -76,12 +73,14 @@ def _make_src_and_dst_indices(
     return src_indices, dst_indices
 
 def _insert_blocks_to_xpu(
-    src_cache: torch.Tensor,
+    cpu_cache: torch.Tensor,
     xpu_cache: torch.Tensor,
+    cpu_block_indices: torch.Tensor,
     xpu_block_indices: torch.Tensor,
 ) -> None:
     # No buffer donor op for XPU, just assign
-    xpu_cache[:, xpu_block_indices] = src_cache
+    xpu_cache[:, xpu_block_indices] = cpu_cache[:, cpu_block_indices].to(
+        xpu_cache.device)
 
 def _swap_out_xpu_blocks(
     xpu_cache: torch.Tensor,
@@ -93,47 +92,32 @@ def _swap_out_xpu_blocks(
     _xpu_cache = xpu_cache[:, xpu_block_indices]
     cpu_cache[:, cpu_block_indices] = _xpu_cache.cpu()
 
-def h2d_copy_blocks(
-    cpu_kv_caches: dict[torch.Tensor],
-    xpu_kv_caches: dict[torch.Tensor],
-    cpu_block_ids: list[int],
-    xpu_block_ids: list[int],
-    xpu_device: str,
+def copy_kv_blocks(
+    src_kv_caches: dict[str, torch.Tensor],
+    dst_kv_caches: dict[str, torch.Tensor],
+    src_block_ids: list[int],
+    dst_block_ids: list[int],
+    direction: Literal["h2d", "d2h"],
 ) -> None:
-    """Copy kv blocks from host xfer buffer to device."""
-    if not cpu_block_ids or not xpu_block_ids or len(cpu_block_ids) != len(xpu_block_ids):
+    """Copy kv blocks between different buffers."""
+    if not src_kv_caches or not dst_kv_caches or \
+       not src_block_ids or not dst_block_ids or \
+       len(src_block_ids) != len(dst_block_ids):
         return
-    host_indices, device_indices = _make_src_and_dst_indices(
-        src_block_ids=cpu_block_ids,
-        dst_block_ids=xpu_block_ids,
-        src_device="cpu",
-        dst_device=xpu_device)
-    for layer_name in cpu_kv_caches:
-        host_tensor = cpu_kv_caches[layer_name]
-        device_tensor = xpu_kv_caches[layer_name]
-        sliced_device_tensor = host_tensor[:, host_indices].to(xpu_device)
-        _insert_blocks_to_xpu(sliced_device_tensor, device_tensor, device_indices)
 
-def d2h_copy_blocks(
-    cpu_kv_caches: dict[torch.Tensor],
-    xpu_kv_caches: dict[torch.Tensor],
-    cpu_block_ids: list[int],
-    xpu_block_ids: list[int],
-    xpu_device: str,
-) -> None:
-    """Copy kv blocks from device to host xfer buffer."""
-    if not cpu_block_ids or not xpu_block_ids or len(cpu_block_ids) != len(xpu_block_ids):
-        return
-    device_indices, host_indices = _make_src_and_dst_indices(
-        src_block_ids=xpu_block_ids,
-        dst_block_ids=cpu_block_ids,
-        src_device=xpu_device,
-        dst_device="cpu")
-    for layer_name in cpu_kv_caches:
-        host_tensor = cpu_kv_caches[layer_name]
-        device_tensor = xpu_kv_caches[layer_name]
-        _swap_out_xpu_blocks(
-            xpu_cache=device_tensor,
-            cpu_cache=host_tensor,
-            xpu_block_indices=device_indices,
-            cpu_block_indices=host_indices)
+    src_device = next(iter(src_kv_caches.values())).device
+    dst_device = next(iter(dst_kv_caches.values())).device
+
+    src_indices, dst_indices = _make_src_and_dst_indices(
+        src_block_ids=src_block_ids,
+        dst_block_ids=dst_block_ids,
+        src_device=src_device,
+        dst_device=dst_device)
+
+    _copy_fn = _insert_blocks_to_xpu if direction == "h2d" else \
+               _swap_out_xpu_blocks
+    for layer_name in src_kv_caches:
+        src_tensor = src_kv_caches[layer_name]
+        dst_tensor = dst_kv_caches[layer_name]
+        _copy_fn(src_tensor, dst_tensor, src_indices, dst_indices)
+
