@@ -80,9 +80,9 @@ def _insert_blocks_to_xpu(
     cpu_block_indices: torch.Tensor,
     xpu_block_indices: torch.Tensor,
 ) -> None:
-    # No buffer donor op for XPU, just assign
-    xpu_cache[:, xpu_block_indices] = cpu_cache[:, cpu_block_indices].to(
-        xpu_cache.device)
+    """ cpu blocks to xpu blocks"""
+    _cpu_cache = cpu_cache[:, cpu_block_indices]
+    xpu_cache[:, xpu_block_indices] = _cpu_cache.to(xpu_cache.device)
 
 
 def _swap_out_xpu_blocks(
