@@ -10,6 +10,7 @@ wheel
 jinja2>=3.1.6
 datasets # for benchmark scripts
 numba == 0.60.0 # v0.61 doesn't support Python 3.9. Required for N-gram speculative decoding
+nixl==0.3.0 # for PD disaggregation
 
 
 torch @ https://ubit-artifactory-ba.intel.com/artifactory/aipc_releases-ba-local/gpu-new/releases/2025.1/IPEX_2.8.10+xpu/RC2/vllm_pytorch_whl_310/torch-2.8.0+xpu-cp310-cp310-linux_x86_64.whl
