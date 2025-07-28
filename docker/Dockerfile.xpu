@@ -25,7 +25,7 @@ RUN apt clean && apt-get update -y && \
 RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.10 1
 RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.10 1
 
-RUN apt install -y libze1 libze-dev libze-intel-gpu1 intel-opencl-icd libze-intel-gpu-raytracing
+RUN apt install -y libze1=1.21.9.0-1136~24.04 libze-dev=1.21.9.0-1136~24.04 libze-intel-gpu1=25.18.33578.15-1146~24.04 intel-opencl-icd=25.18.33578.15-1146~24.04 libze-intel-gpu-raytracing=1.1.0-0ubuntu1~24.04~ppa1
 
 RUN wget https://ubit-artifactory-ba.intel.com/artifactory/aipc_releases-ba-local/gpu/new/validation/IPEX/weekly/PVC/2025/vllm_BMG/DEV_ww30.4/intel-oneccl-2021.15.4.11_offline.sh
 RUN bash intel-oneccl-2021.15.4.11_offline.sh -a --silent --eula accept && echo "source /opt/intel/oneapi/setvars.sh --force" >> /root/.bashrc
