@@ -9,7 +9,6 @@ from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group)
 from vllm.logger import init_logger
 from vllm.v1.kv_cache_interface import KVCacheConfig
-from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 if TYPE_CHECKING:
@@ -37,25 +36,8 @@ class XPUModelRunner(GPUModelRunner):
         torch.xpu.synchronize()
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
-        """
-        Initialize KV cache based on `kv_cache_config`.
-        Args:
-            kv_cache_config: Configuration for the KV cache, including the KV
-            cache size of each layer
-        """
-        self.kv_cache_config = kv_cache_config
-        self.may_reinitialize_input_batch(kv_cache_config)
-        self.initialize_attn_backend(kv_cache_config)
-        kv_caches = self.initialize_kv_cache_tensors(kv_cache_config)
-
-        if self.speculative_config and self.speculative_config.use_eagle():
-            assert isinstance(self.drafter, EagleProposer)
-            # validate all draft model layers belong to the same kv cache
-            # group
-            self.drafter.validate_same_kv_cache_group(kv_cache_config)
-
+        super().initialize_kv_cache(kv_cache_config)
         if has_kv_transfer_group():
-            get_kv_transfer_group().register_kv_caches(kv_caches)
             get_kv_transfer_group().set_host_xfer_buffer_ops(copy_kv_blocks)
 
 
