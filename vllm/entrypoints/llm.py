@@ -239,7 +239,7 @@ class LLM:
                 compilation_config_instance = compilation_config
         else:
             compilation_config_instance = CompilationConfig()
-
+        kwargs.pop("device", None)
         engine_args = EngineArgs(
             model=model,
             task=task,
