@@ -17,4 +17,4 @@ torchaudio @ https://ubit-artifactory-ba.intel.com/artifactory/aipc_releases-ba-
 torchvision @https://ubit-artifactory-ba.intel.com/artifactory/aipc_releases-ba-local/gpu-new/releases/2025.1/IPEX_2.8.10+xpu/RC2/vllm_pytorch_whl_310/torchvision-0.23.0+xpu-cp310-cp310-manylinux_2_28_x86_64.whl
 pytorch-triton-xpu @ https://ubit-artifactory-ba.intel.com/artifactory/aipc_releases-ba-local/gpu-new/releases/2025.1/IPEX_2.8.10+xpu/RC2/vllm_pytorch_whl_310/pytorch_triton_xpu-3.4.0-cp310-cp310-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
 
-intel-extension-for-pytorch @ https://ubit-artifactory-ba.intel.com/artifactory/aipc_releases-ba-local/gpu/new/validation/IPEX/weekly/PVC/2025/vllm_BMG/DEV_ww30.4/intel_extension_for_pytorch-2.8.10+gita467304-cp310-cp310-linux_x86_64.whl
+intel-extension-for-pytorch @ https://ubit-artifactory-ba.intel.com/artifactory/aipc_releases-ba-local//gpu/new/validation/IPEX/nightly/PVC/UBUNTU/VLLM_nightly/20250730/intel_extension_for_pytorch-2.8.10+gita33a1a1-cp310-cp310-linux_x86_64.whl
