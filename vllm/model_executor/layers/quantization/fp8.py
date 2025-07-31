@@ -1105,7 +1105,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             custom_routing_function: Optional[Callable] = None,
             **kwargs,
     ):
-        assert custom_routing_function is None
+
         return layer.ipex_fusion(
             x,
             use_grouped_topk,
@@ -1114,6 +1114,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             renormalize,
             topk_group,
             num_expert_group,
+            custom_routing_function=custom_routing_function,
         )
 
 class Fp8KVCacheMethod(BaseKVCacheMethod):
