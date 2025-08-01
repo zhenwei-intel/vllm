@@ -591,8 +591,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             renormalize,
             topk_group,
             num_expert_group,
-            custom_routing_function=custom_routing_function
-        )
+            custom_routing_function=custom_routing_function)
 
     def forward_tpu(
         self,
@@ -646,6 +645,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         forward_native = forward_tpu
     elif current_platform.is_cpu():
         forward_native = forward_cpu
+    elif current_platform.is_xpu():
+        forward_native = forward_xpu
     else:
         forward_native = forward_cuda
 
