@@ -102,10 +102,6 @@ def get_kv_connector_cache_layout():
     # NOTE (NickLucche) When running disaggregated PD with NIXL, HND layout is
     # used for faster transfer.
     vllm_config = get_current_vllm_config()
-    if vllm_config.device_config.device_type == "xpu":
-        logger.info_once("NixlConnector detected. " \
-                         "XPU attn kernels only support NHD layout.")
-        return "NHD"
     kv_config = vllm_config.kv_transfer_config
     if kv_config is not None and vllm_config.model_config is None:
         logger.warning_once("Unable to detect current VLLM config. " \
