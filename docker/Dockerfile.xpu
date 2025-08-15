@@ -35,8 +35,8 @@ WORKDIR /workspace/vllm
 COPY requirements/xpu.txt /workspace/vllm/requirements/xpu.txt
 COPY requirements/common.txt /workspace/vllm/requirements/common.txt
 
-# Temp workaround for avoiding pip install security check
-RUN mv /usr/lib/python3.12/EXTERNALLY-MANAGED /usr/lib/python3.12/EXTERNALLY-MANAGED.bak
+# suppress the python externally managed environment error
+RUN python3 -m pip config set global.break-system-packages true
 
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install --no-cache-dir \
