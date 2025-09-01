@@ -86,7 +86,6 @@ class XPUPlatform(Platform):
     def get_vit_attn_backend(cls, support_fa: bool = False) -> _Backend:
         return _Backend.IPEX
 
-
     @classmethod
     def inference_mode(cls):
         return torch.no_grad()
@@ -161,6 +160,13 @@ class XPUPlatform(Platform):
                 vllm_config.scheduler_config.max_model_len,
                 DEFAULT_MAX_NUM_BATCHED_TOKENS)
 
+        if (envs.VLLM_KV_CACHE_LAYOUT is None
+                or envs.VLLM_KV_CACHE_LAYOUT != "NHD"):
+            os.environ["VLLM_KV_CACHE_LAYOUT"] = "NHD"
+            logger.info(
+                "Setting VLLM_KV_CACHE_LAYOUT to 'NHD' for XPU; "
+                "only NHD layout is supported by XPU attention kernels.")
+
     @classmethod
     def is_pin_memory_available(cls):
         return True
@@ -214,3 +220,42 @@ class XPUPlatform(Platform):
     @classmethod
     def device_count(cls) -> int:
         return torch.xpu.device_count()
+
+    @classmethod
+    def check_if_supports_dtype(cls, torch_dtype: torch.dtype):
+        if torch_dtype == torch.bfloat16:  # noqa: SIM102
+            device_name = cls.get_device_name().lower()
+            # client gpu a770
+            if device_name.count("a770") > 0:
+                raise ValueError(
+                    "Intel Arc A770 have bfloat16 accuracy known issue. "
+                    "You can use float16 instead by explicitly setting the "
+                    "`dtype` flag in CLI, for example: --dtype=half.")
+
+    @classmethod
+    def opaque_attention_op(cls) -> bool:
+        return True
+
+    @classmethod
+    def insert_blocks_to_device(
+        cls,
+        src_cache: torch.Tensor,
+        dst_cache: torch.Tensor,
+        src_block_indices: torch.Tensor,
+        dst_block_indices: torch.Tensor,
+    ) -> None:
+        """Copy blocks from src_cache to dst_cache on XPU."""
+        _src_cache = src_cache[:, src_block_indices]
+        dst_cache[:, dst_block_indices] = _src_cache.to(dst_cache.device)
+
+    @classmethod
+    def swap_out_blocks_to_host(
+        cls,
+        src_cache: torch.Tensor,
+        dst_cache: torch.Tensor,
+        src_block_indices: torch.Tensor,
+        dst_block_indices: torch.Tensor,
+    ) -> None:
+        """Copy blocks from XPU to host (CPU)."""
+        _src_cache = src_cache[:, src_block_indices]
+        dst_cache[:, dst_block_indices] = _src_cache.cpu()
