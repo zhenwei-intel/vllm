@@ -122,7 +122,8 @@ class XPUPlatform(Platform):
             logger.info("[XPU] CUDA graph is not supported on XPU, "
                         "disabling cudagraphs.")
             compilation_config.cudagraph_mode = CUDAGraphMode.NONE
-
+        if compilation_config.compile_sizes is None:
+            compilation_config.compile_sizes = {}
         # check and update parallel config
         parallel_config = vllm_config.parallel_config
         parallel_config.worker_cls = "vllm.v1.worker.xpu_worker.XPUWorker"
