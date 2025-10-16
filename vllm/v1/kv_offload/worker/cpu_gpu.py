@@ -183,3 +183,31 @@ class CpuGpuOffloadingHandler(OffloadingHandler):
         for job_id, _ in results:
             del self.transfer_events[job_id]
         return results
+
+
+class CpuXpuOffloadingHandler(OffloadingHandler):
+    def __init__(
+        self,
+        gpu_block_size: int,
+        cpu_block_size: int,
+        num_cpu_blocks: int,
+        gpu_caches: dict[str, torch.Tensor],
+        attn_backends: dict[str, type[AttentionBackend]],
+    ):
+        assert cpu_block_size % gpu_block_size == 0
+        self.block_size_factor = cpu_block_size // gpu_block_size
+
+        pass
+
+    def transfer_async(self, job_id: int, spec: TransferSpec) -> bool:
+        pass
+
+    def get_finished(self) -> list[TransferResult]:
+        results: list[TransferResult] = []
+        for job_id, event in self.transfer_events.items():
+            if event.query():
+                results.append((job_id, True))
+                self.events_pool.append(event)
+        for job_id, _ in results:
+            del self.transfer_events[job_id]
+        return results

@@ -26,6 +26,7 @@ class GPULoadStoreSpec(BlockIDsLoadStoreSpec):
 
     @staticmethod
     def medium() -> str:
+        # if xpu return xpu
         return "GPU"
 
 

@@ -7,9 +7,10 @@ import pytest
 from vllm import LLM, SamplingParams
 from vllm.config import KVTransferConfig
 
-CPU_BLOCK_SIZES = [16, 48]
-
-
+# CPU_BLOCK_SIZES = [16, 48]
+# xpu 的blocksize是64， 要求cpu block size % gpu block size == 0
+# assert cpu_block_size % gpu_block_size == 0
+CPU_BLOCK_SIZES = [64]
 @pytest.mark.parametrize("cpu_block_size", CPU_BLOCK_SIZES)
 def test_cpu_offloading(cpu_block_size: int) -> None:
     """

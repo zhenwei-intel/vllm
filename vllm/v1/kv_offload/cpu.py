@@ -65,6 +65,7 @@ class CPUOffloadingSpec(OffloadingSpec):
                 for layer_name in layer_names
             }
 
+            # if xpu CpuXpuOffloadingHandler
             self._handler = CpuGpuOffloadingHandler(
                 attn_backends=attn_backends,
                 gpu_block_size=self.gpu_block_size,
