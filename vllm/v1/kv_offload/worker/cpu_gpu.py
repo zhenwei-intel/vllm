@@ -112,6 +112,24 @@ class CpuGpuOffloadingHandler(OffloadingHandler):
                 )
             )
 
+    def _swap_blocks_pytorch(self, src, dst, src_to_dst_tensor):
+        """
+        使用PyTorch操作实现块交换
+        src_to_dst_tensor: 形状为 [N, 2] 的张量，每行包含 [src_index, dst_index]
+        """
+        # 将索引转换为列表
+        src_indices = src_to_dst_tensor[:, 0].tolist()
+        dst_indices = src_to_dst_tensor[:, 1].tolist()
+        
+        # 创建临时缓冲区存储源数据
+        temp_buffer = src[src_indices].clone()
+        
+        # 将目标数据复制到源位置
+        src[src_indices] = dst[dst_indices]
+        
+        # 将临时缓冲区（原始源数据）复制到目标位置
+        dst[dst_indices] = temp_buffer
+
     def transfer_async(self, job_id: int, spec: TransferSpec) -> bool:
         src_spec, dst_spec = spec
         if isinstance(src_spec, CPULoadStoreSpec):
@@ -161,12 +179,12 @@ class CpuGpuOffloadingHandler(OffloadingHandler):
                 if kv_dim:
                     src_key_cache = src_tensor[0]
                     dst_key_cache = dst_tensor[0]
-                    ops.swap_blocks(src_key_cache, dst_key_cache, src_to_dst_tensor)
+                    self._swap_blocks_pytorch(src_key_cache, dst_key_cache, src_to_dst_tensor)
                     src_value_cache = src_tensor[1]
                     dst_value_cache = dst_tensor[1]
-                    ops.swap_blocks(src_value_cache, dst_value_cache, src_to_dst_tensor)
+                    self._swap_blocks_pytorch(src_value_cache, dst_value_cache, src_to_dst_tensor)
                 else:
-                    ops.swap_blocks(src_tensor, dst_tensor, src_to_dst_tensor)
+                    self._swap_blocks_pytorch(src_tensor, dst_tensor, src_to_dst_tensor)
             event.record(stream)
 
         self.transfer_events[job_id] = event
