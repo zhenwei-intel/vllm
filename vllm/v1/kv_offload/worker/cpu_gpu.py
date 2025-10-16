@@ -64,13 +64,13 @@ class CpuGpuOffloadingHandler(OffloadingHandler):
         self.block_size_factor = cpu_block_size // gpu_block_size
 
         # cuda streams for gpu->cpu and cpu->gpu
-        self.d2h_stream = torch.cuda.Stream()
-        self.h2d_stream = torch.cuda.Stream()
+        self.d2h_stream = torch.xpu.Stream()
+        self.h2d_stream = torch.xpu.Stream()
 
-        # job_id -> transfer cuda event
-        self.transfer_events: dict[int, torch.cuda.Event] = {}
-        # list of cuda events available for re-use
-        self.events_pool: list[torch.cuda.Event] = []
+        # job_id -> transfer xpu event
+        self.transfer_events: dict[int, torch.xpu.Event] = {}
+        # list of xpu events available for re-use
+        self.events_pool: list[torch.xpu.Event] = []
 
         pin_memory = is_pin_memory_available()
 
@@ -153,8 +153,8 @@ class CpuGpuOffloadingHandler(OffloadingHandler):
         )
         src_to_dst_tensor = torch.from_numpy(src_to_dst)
 
-        event = self.events_pool.pop() if self.events_pool else torch.cuda.Event()
-        with torch.cuda.stream(stream):
+        event = self.events_pool.pop() if self.events_pool else torch.xpu.Event()
+        with torch.xpu.stream(stream):
             for src_tensor, dst_tensor, kv_dim in zip(
                 src_tensors, dst_tensors, self.kv_dim_before_num_blocks
             ):
