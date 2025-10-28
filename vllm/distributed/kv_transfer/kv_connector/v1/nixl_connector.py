@@ -83,7 +83,10 @@ _NIXL_SUPPORTED_DEVICE = {
         "cpu",
     ),
     "tpu": ("cpu",),
-    "xpu": ("cpu",),
+    "xpu": (
+        "cpu",
+        "xpu",
+    ),
 }
 # support for oot platform by providing mapping in current_platform
 _NIXL_SUPPORTED_DEVICE.update(current_platform.get_nixl_supported_devices())
@@ -586,10 +589,7 @@ class NixlConnectorWorker:
         # type based on kv_buffer_device
         nixl_memory_type = current_platform.get_nixl_memory_type()
         if nixl_memory_type is None:
-            if self.kv_buffer_device == "cuda":
-                nixl_memory_type = "VRAM"
-            elif self.kv_buffer_device == "cpu":
-                nixl_memory_type = "DRAM"
+            nixl_memory_type = "DRAM" if self.kv_buffer_device == "cpu" else "VRAM"
         if nixl_memory_type is None:
             raise RuntimeError(
                 f"{self.device_type} with {self.kv_buffer_device} kv_buffer "
