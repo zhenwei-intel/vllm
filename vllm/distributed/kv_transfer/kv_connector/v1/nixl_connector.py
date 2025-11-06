@@ -340,9 +340,12 @@ class NixlConnectorScheduler:
             + vllm_config.parallel_config.data_parallel_rank
         )
         assert vllm_config.kv_transfer_config is not None
-        self.use_host_buffer = (
-            False  # vllm_config.kv_transfer_config.kv_buffer_device == "cpu"
-        )
+        self.use_host_buffer = False
+        if (
+            vllm_config.kv_transfer_config.kv_buffer_device == "cpu"
+            and self.vllm_config.device_type != "cpu"
+        ):
+            self.use_host_buffer = True
         logger.info("Initializing NIXL Scheduler %s", engine_id)
 
         # Background thread for handling new handshake requests.
@@ -787,7 +790,9 @@ class NixlConnectorWorker:
         # cpu kv buffer for xfer
         # used when device memory can not be registered under nixl
         self.host_xfer_buffers: dict[str, torch.Tensor] = {}
-        self.use_host_buffer = False  # self.kv_buffer_device == "cpu"
+        self.use_host_buffer = False
+        if self.kv_buffer_device == "cpu" and self.device_type != "cpu":
+            self.use_host_buffer = True
         # support for oot platform which can't register nixl memory
         # type based on kv_buffer_device
         nixl_memory_type = current_platform.get_nixl_memory_type()
