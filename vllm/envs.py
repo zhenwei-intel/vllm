@@ -216,6 +216,7 @@ if TYPE_CHECKING:
     VLLM_NCCL_INCLUDE_PATH: str | None = None
     VLLM_USE_FBGEMM: bool = False
     VLLM_GC_DEBUG: str = ""
+    VLLM_OFFLOAD_WEIGHTS_BEFORE_QUANT: bool = False
 
 
 def get_default_cache_root():
@@ -1408,6 +1409,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # - VLLM_GC_DEBUG='{"top_objects":5}': enable GC debugger with
     #                                      top 5 collected objects
     "VLLM_GC_DEBUG": lambda: os.getenv("VLLM_GC_DEBUG", ""),
+    # Offload model weights to cpu before online fp8 quantization
+    "VLLM_OFFLOAD_WEIGHTS_BEFORE_QUANT": lambda: os.environ.get(
+        "VLLM_OFFLOAD_WEIGHTS_BEFORE_QUANT", "0"
+    )
+    == "1",
 }
 
 # --8<-- [end:env-vars-definition]
