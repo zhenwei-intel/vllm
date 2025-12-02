@@ -552,7 +552,7 @@ class NixlConnectorWorker:
                 separator.join(str(net_device) for net_device in net_devices)
             logger.info("The hpu device currently identified as tp_rank#%d/tp_size#%d will use %s", \
                     self.tp_rank, self.world_size, os.getenv('UCX_NET_DEVICES', ''))
-+
+
         # TODO temporary, once nixl allows for telemetry flag in config
         # (next release), we can remove this env var.
         os.environ["NIXL_TELEMETRY_ENABLE"] = "1"
