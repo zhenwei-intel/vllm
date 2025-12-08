@@ -19,6 +19,7 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.attention.backends.fa_utils import (
     flash_attn_supports_fp8,
+    flash_attn_supports_quant_query_input,
     get_flash_attn_version,
     is_flash_attn_varlen_func_available,
 )
@@ -575,7 +576,7 @@ class FlashAttentionImpl(AttentionImpl):
                 "heads in the layer"
             )
 
-        self.supports_quant_query_input = True
+        self.supports_quant_query_input = flash_attn_supports_quant_query_input()
 
     def forward(
         self,
