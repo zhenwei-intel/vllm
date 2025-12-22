@@ -118,7 +118,10 @@ _NIXL_SUPPORTED_DEVICE = {
         "cpu",
     ),
     "tpu": ("cpu",),
-    "xpu": ("cpu",),
+    "xpu": (
+        "cpu",
+        "xpu",
+    ),
     "cpu": ("cpu",),
 }
 # support for oot platform by providing mapping in current_platform
@@ -816,6 +819,20 @@ class NixlConnectorWorker:
         # Config.
         self.vllm_config = vllm_config
         self.block_size = vllm_config.cache_config.block_size
+        self.engine_id: EngineId = engine_id
+        self.tp_rank = get_tensor_model_parallel_rank()
+        self.world_size = get_tensor_model_parallel_world_size()
+        self.tp_group = get_tp_group()
+
+        ze_masks = os.getenv("ZE_AFFINITY_MASK")
+        ze_masks = ze_masks.split(",")
+        curr_mask = int(ze_masks[self.tp_rank])
+        os.environ["UCX_NET_DEVICES"] = f"mlx5_{curr_mask // 2}:1"
+        logger.info("The xpu device currently identified as tp_rank#%d/tp_size#%d will use %s",
+                    self.tp_rank,
+                    self.world_size,
+                    os.getenv("UCX_NET_DEVICES", ""),
+                    )
 
         if vllm_config.kv_transfer_config is None:
             raise ValueError("kv_transfer_config must be set for NixlConnector")
@@ -851,10 +868,6 @@ class NixlConnectorWorker:
         self._remote_agents: dict[EngineId, dict[int, str]] = defaultdict(dict)
 
         # Metadata.
-        self.engine_id: EngineId = engine_id
-        self.tp_rank = get_tensor_model_parallel_rank()
-        self.world_size = get_tensor_model_parallel_world_size()
-        self.tp_group = get_tp_group()
         self.num_blocks = 0
         self.enable_permute_local_kv = False
 
@@ -882,10 +895,7 @@ class NixlConnectorWorker:
         # type based on kv_buffer_device
         nixl_memory_type = current_platform.get_nixl_memory_type()
         if nixl_memory_type is None:
-            if self.kv_buffer_device == "cuda":
-                nixl_memory_type = "VRAM"
-            elif self.kv_buffer_device == "cpu":
-                nixl_memory_type = "DRAM"
+            nixl_memory_type = "DRAM" if self.kv_buffer_device == "cpu" else "VRAM"
         if nixl_memory_type is None:
             raise RuntimeError(
                 f"{self.device_type} with {self.kv_buffer_device} kv_buffer "

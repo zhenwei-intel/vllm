@@ -171,6 +171,8 @@ async def send_request_to_service(
     req_data["max_tokens"] = 1
     if "max_completion_tokens" in req_data:
         req_data["max_completion_tokens"] = 1
+    if "min_tokens" in req_data:
+        req_data["min_tokens"] = 1
     if "stream_options" in req_data:
         del req_data["stream_options"]
     headers = {
@@ -241,7 +243,7 @@ async def _handle_completions(api: str, request: Request):
             ):
                 yield chunk
 
-        return StreamingResponse(generate_stream(), media_type="application/json")
+        return StreamingResponse(generate_stream(), media_type="text/event-stream")
 
     except Exception as e:
         import sys
