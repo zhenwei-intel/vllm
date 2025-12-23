@@ -1,0 +1,174 @@
+diff --git a/src/aiperf/common/config/config_defaults.py b/src/aiperf/common/config/config_defaults.py
+index 1054a17..90e280b 100644
+--- a/src/aiperf/common/config/config_defaults.py
++++ b/src/aiperf/common/config/config_defaults.py
+@@ -1,6 +1,7 @@
+ # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ # SPDX-License-Identifier: Apache-2.0
+ 
++import time
+ from dataclasses import dataclass
+ from pathlib import Path
+ 
+@@ -9,6 +10,8 @@ from aiperf.common.enums import (
+     AIPerfUIType,
+     AudioFormat,
+     CommunicationBackend,
++    ConnectionReuseStrategy,
++    DatasetSamplingStrategy,
+     EndpointType,
+     ExportLevel,
+     ImageFormat,
+@@ -19,7 +22,6 @@ from aiperf.common.enums import (
+     VideoFormat,
+     VideoSynthType,
+ )
+-from aiperf.common.enums.dataset_enums import DatasetSamplingStrategy
+ 
+ 
+ #
+@@ -36,8 +38,11 @@ class EndpointDefaults:
+     TYPE = EndpointType.CHAT
+     STREAMING = False
+     URL = "localhost:8000"
+-    TIMEOUT = 600.0
++    TIMEOUT = 6 * 60 * 60  # 6 hours, match vLLM benchmark default
+     API_KEY = None
++    USE_LEGACY_MAX_TOKENS = False
++    USE_SERVER_TOKEN_COUNT = False
++    CONNECTION_REUSE_STRATEGY = ConnectionReuseStrategy.POOLED
+ 
+ 
+ @dataclass(frozen=True)
+@@ -58,6 +63,16 @@ class InputDefaults:
+     NUM_DATASET_ENTRIES = 100
+ 
+ 
++@dataclass(frozen=True)
++class RankingsDefaults:
++    PASSAGES_MEAN = 1
++    PASSAGES_STDDEV = 0
++    PASSAGES_PROMPT_TOKEN_MEAN = 550
++    PASSAGES_PROMPT_TOKEN_STDDEV = 0
++    QUERY_PROMPT_TOKEN_MEAN = 550
++    QUERY_PROMPT_TOKEN_STDDEV = 0
++
++
+ @dataclass(frozen=True)
+ class AudioDefaults:
+     BATCH_SIZE = 1
+@@ -133,7 +148,7 @@ class OutputDefaults:
+     ARTIFACT_DIRECTORY = Path("./artifacts")
+     RAW_RECORDS_FOLDER = Path("raw_records")
+     LOG_FOLDER = Path("logs")
+-    LOG_FILE = Path("aiperf.log")
++    LOG_FILE = Path(f"aiperf_{int(time.time())}.log")
+     INPUTS_JSON_FILE = Path("inputs.json")
+     PROFILE_EXPORT_AIPERF_CSV_FILE = Path("profile_export_aiperf.csv")
+     PROFILE_EXPORT_AIPERF_JSON_FILE = Path("profile_export_aiperf.json")
+@@ -145,6 +160,11 @@ class OutputDefaults:
+     )
+     PROFILE_EXPORT_JSONL_FILE = Path("profile_export.jsonl")
+     PROFILE_EXPORT_RAW_JSONL_FILE = Path("profile_export_raw.jsonl")
++    PROFILE_EXPORT_GPU_TELEMETRY_JSONL_FILE = Path("gpu_telemetry_export.jsonl")
++    SERVER_METRICS_EXPORT_JSONL_FILE = Path("server_metrics_export.jsonl")
++    SERVER_METRICS_EXPORT_JSON_FILE = Path("server_metrics_export.json")
++    SERVER_METRICS_EXPORT_CSV_FILE = Path("server_metrics_export.csv")
++    SERVER_METRICS_EXPORT_PARQUET_FILE = Path("server_metrics_export.parquet")
+     EXPORT_LEVEL = ExportLevel.RECORDS
+     SLICE_DURATION = None
+ 
+@@ -192,3 +212,4 @@ class LoadGeneratorDefaults:
+ class WorkersDefaults:
+     MIN = None
+     MAX = None
++
+diff --git a/src/aiperf/common/config/output_config.py b/src/aiperf/common/config/output_config.py
+index 8f0b5a6..df838c1 100644
+--- a/src/aiperf/common/config/output_config.py
++++ b/src/aiperf/common/config/output_config.py
+@@ -72,6 +72,21 @@ class OutputConfig(BaseConfig):
+     )
+     _profile_export_jsonl_file: Path = OutputDefaults.PROFILE_EXPORT_JSONL_FILE
+     _profile_export_raw_jsonl_file: Path = OutputDefaults.PROFILE_EXPORT_RAW_JSONL_FILE
++    _profile_export_gpu_telemetry_jsonl_file: Path = (
++        OutputDefaults.PROFILE_EXPORT_GPU_TELEMETRY_JSONL_FILE
++    )
++    _server_metrics_export_jsonl_file: Path = (
++        OutputDefaults.SERVER_METRICS_EXPORT_JSONL_FILE
++    )
++    _server_metrics_export_json_file: Path = (
++        OutputDefaults.SERVER_METRICS_EXPORT_JSON_FILE
++    )
++    _server_metrics_export_csv_file: Path = (
++        OutputDefaults.SERVER_METRICS_EXPORT_CSV_FILE
++    )
++    _server_metrics_export_parquet_file: Path = (
++        OutputDefaults.SERVER_METRICS_EXPORT_PARQUET_FILE
++    )
+ 
+     @model_validator(mode="after")
+     def set_export_filenames(self) -> Self:
+@@ -82,10 +97,18 @@ class OutputConfig(BaseConfig):
+         base_path = self.profile_export_prefix
+         base_str = str(base_path)
+ 
++        # Check complex suffixes first (longest to shortest) to avoid double-suffixing
++        # e.g., if user passes "foo_raw.jsonl", we want "foo" not "foo_raw"
+         suffixes_to_strip = [
++            "_server_metrics.parquet",
++            "_server_metrics.jsonl",
++            "_server_metrics.json",
++            "_server_metrics.csv",
++            "_gpu_telemetry.jsonl",
+             "_timeslices.csv",
+             "_timeslices.json",
+             "_raw.jsonl",
++            ".parquet",
+             ".csv",
+             ".json",
+             ".jsonl",
+@@ -101,7 +124,17 @@ class OutputConfig(BaseConfig):
+         self._profile_export_timeslices_json_file = Path(f"{base_str}_timeslices.json")
+         self._profile_export_jsonl_file = Path(f"{base_str}.jsonl")
+         self._profile_export_raw_jsonl_file = Path(f"{base_str}_raw.jsonl")
+-
++        self._profile_export_gpu_telemetry_jsonl_file = Path(
++            f"{base_str}_gpu_telemetry.jsonl"
++        )
++        self._server_metrics_export_jsonl_file = Path(
++            f"{base_str}_server_metrics.jsonl"
++        )
++        self._server_metrics_export_json_file = Path(f"{base_str}_server_metrics.json")
++        self._server_metrics_export_csv_file = Path(f"{base_str}_server_metrics.csv")
++        self._server_metrics_export_parquet_file = Path(
++            f"{base_str}_server_metrics.parquet"
++        )
+         return self
+ 
+     slice_duration: Annotated[
+@@ -138,3 +171,23 @@ class OutputConfig(BaseConfig):
+     @property
+     def profile_export_raw_jsonl_file(self) -> Path:
+         return self.artifact_directory / self._profile_export_raw_jsonl_file
++
++    @property
++    def profile_export_gpu_telemetry_jsonl_file(self) -> Path:
++        return self.artifact_directory / self._profile_export_gpu_telemetry_jsonl_file
++
++    @property
++    def server_metrics_export_jsonl_file(self) -> Path:
++        return self.artifact_directory / self._server_metrics_export_jsonl_file
++
++    @property
++    def server_metrics_export_json_file(self) -> Path:
++        return self.artifact_directory / self._server_metrics_export_json_file
++
++    @property
++    def server_metrics_export_csv_file(self) -> Path:
++        return self.artifact_directory / self._server_metrics_export_csv_file
++
++    @property
++    def server_metrics_export_parquet_file(self) -> Path:
++        return self.artifact_directory / self._server_metrics_export_parquet_file
+\ No newline at end of file
