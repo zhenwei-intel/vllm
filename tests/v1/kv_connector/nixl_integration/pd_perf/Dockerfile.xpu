@@ -1,0 +1,80 @@
+FROM gar-registry.caas.intel.com/pytorch/pytorch-ipex-spr:multi-bmg_release_2511_py2.9_ww51.4 AS vllm-base
+
+RUN apt-get update && apt-get install -y \
+    pciutils \
+    net-tools \
+    iproute2 \
+    hwloc \
+    numactl \
+    wget \
+    curl \
+    git \
+    build-essential 
+
+RUN apt-get install -y \
+    autoconf \
+    automake \
+    libtool \
+    pkg-config
+
+RUN apt-get update && apt-get install -y \
+    rdma-core \
+    libibverbs-dev \
+    ibverbs-utils \
+    libibverbs1 \
+    ibverbs-providers \
+    librdmacm-dev \
+    librdmacm1 \
+    libibumad-dev \
+    libibumad3 \
+    libibmad-dev \
+    libibmad5 \
+    infiniband-diags \
+    perftest \
+    ibutils \
+    libmlx5-1 \
+    libmlx4-1 \
+    ibverbs-providers \
+    librdmacm1t64
+
+RUN rm -fr /tmp/ucx_source && rm -fr /tmp/ucx_install && git clone -b cherry/enable-ze-ipc https://github.com/zhangxiaoli73/ucx /tmp/ucx_source
+
+WORKDIR /tmp/ucx_source
+
+RUN git reset --hard 336d86aada7d5ce8893c33e0805d7a8414666282 && bash autogen.sh
+
+RUN ./configure --prefix=/tmp/ucx_install --with-mlx5=no --with-ze=yes --enable-examples --enable-mt
+
+RUN make CFLAGS="-Wno-error=incompatible-pointer-types" && make install
+
+ENV LIBUCX_ROOT=/tmp/ucx_install
+ENV LIBNIXL_ROOT=/tmp/nixl_install
+ENV PKG_CONFIG_PATH=$LIBUCX_ROOT/lib/pkgconfig:$LIBNIXL_ROOT/lib/pkgconfig:$PKG_CONFIG_PATH
+ENV CPLUS_INCLUDE_PATH=$LIBNIXL_ROOT/include:$CPLUS_INCLUDE_PATH
+ENV C_INCLUDE_PATH=$LIBNIXL_ROOT/include:$C_INCLUDE_PATH
+ENV LDFLAGS="-L$LIBNIXL_ROOT/lib $LDFLAGS"
+ENV LD_LIBRARY_PATH=$LIBNIXL_ROOT/lib:$LD_LIBRARY_PATH
+
+RUN rm -fr /tmp/nixl_source && git clone https://github.com/ai-dynamo/nixl /tmp/nixl_source
+WORKDIR /tmp/nixl_source
+RUN git checkout 0.7.0 && pip install --upgrade meson pybind11 patchelf && pip install -r requirements.txt
+RUN meson setup \
+    --wipe \
+    --prefix=$LIBNIXL_ROOT \
+    --buildtype=release \
+    -Ddisable_gds_backend=true \
+    -Ducx_path=$LIBUCX_ROOT \
+    builddir .
+
+RUN cd builddir && \
+    ninja && \
+    ninja install && \
+    ldconfig && cd ..
+ 
+RUN pip install .
+
+WORKDIR /workspace/vllm
+RUN pip uninstall -y vllm && \
+    git checkout pd_xpu_inner_0.11.1 && \
+    VLLM_TARGET_DEVICES=xpu python setup.py install && \
+    pip install aiperf==0.3.0
