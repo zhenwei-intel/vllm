@@ -88,3 +88,12 @@ python3 benchmarks/disagg_benchmarks/round_robin_proxy.py
 ```bash
 bash perf_aiperf.sh --prefill-tp 2 --prefill-dp 1 --decode-tp 2 --decode-dp 1 --mode disaggregated --artifacts-root-dir artifacts_2p1d_1500 --url localhost:7300 --isl 1500 --concurrency 1.2,1.4,1.6,1.8,2 --model ibnzterrell/Meta-Llama-3.3-70B-Instruct-AWQ-INT4
 ```
+
+# Performance Test
+Performance data of Llama3.3-70B int4 model with fp8 kvcache on 8xB60, ISL=1500, OSL=150
+2P1D vs Non-PD under SLO TTFT<5s, ITL<100ms
+
+- Serve more requests: under SLO, 2P1D achieved a request throughput of 1.06, compared to 0.64 for the Non-PD — 1.65x improvement.
+- Better user experience: At a request rate of 1.2 (system saturation), the 2P1D output speed (15.39) outperformed the Non-PD setup (6.59) by 2.33x.
+
+![alt text](pd_perf_llama3_70B.png)
