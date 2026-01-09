@@ -74,7 +74,7 @@ RUN cd builddir && \
 RUN pip install .
 
 WORKDIR /workspace/vllm
-RUN pip uninstall -y vllm && \
-    git checkout pd_xpu_inner_0.11.1 && \
+RUN cd /workspace/vllm && pip uninstall -y vllm && \
+    git fetch && git checkout pd_xpu_inner_0.11.1 && \
     VLLM_TARGET_DEVICES=xpu python setup.py install && \
     pip install aiperf==0.3.0
