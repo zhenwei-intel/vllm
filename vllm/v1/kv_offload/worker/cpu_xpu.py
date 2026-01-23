@@ -4,7 +4,7 @@ from contextlib import contextmanager
 
 import torch
 
-from vllm.attention.backends.abstract import AttentionBackend
+from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_offload.worker.cpu_gpu import CpuGpuOffloadingHandlers
 
 
@@ -34,6 +34,7 @@ def _torch_cuda_wrapper():
         torch.cuda.Event = torch.xpu.Event
         torch.cuda.Stream = torch.xpu.Stream
         torch.cuda.stream = torch.xpu.stream
+        torch.cuda.current_stream = torch.xpu.current_stream
         yield
     finally:
         pass

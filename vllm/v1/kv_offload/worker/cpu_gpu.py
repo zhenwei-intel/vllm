@@ -99,7 +99,9 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
         self.dst_block_size_factor: int = dst_block_size_factor
 
         assert len(src_tensors) > 0
-        self.gpu_to_cpu: bool = self.src_tensors[0].is_cuda
+        self.gpu_to_cpu: bool = (
+            self.src_tensors[0].is_cuda or self.src_tensors[0].is_xpu
+        )
 
         # job_id -> event
         self._transfer_events: dict[int, torch.Event] = {}
