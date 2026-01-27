@@ -16,7 +16,6 @@ from vllm.model_executor.layers.fused_moe import (
     FusedMoeWeightScaleSupported,
 )
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
-from vllm.model_executor.layers.fused_moe.layer import FusedMoE
 from vllm.model_executor.layers.fused_moe.fused_moe_router import (
     FusedMoERouter,
 )
@@ -413,6 +412,10 @@ class XPUFp8LinearMethod(Fp8LinearMethod):
     ) -> torch.Tensor:
         weight = layer.weight.data
         weight_scale = layer.weight_scale.data
+        # In case of pooler models, pooled_data may change to head_dtype like float
+        # which fp8_gemm_w8a16 doesn't support
+        if x.dtype == torch.float:
+            x = x.to(torch.bfloat16)
         output = torch.ops.torch_ipex.fp8_gemm_w8a16(
             x, weight, True, weight_scale, bias
         )
