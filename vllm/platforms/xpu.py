@@ -183,6 +183,11 @@ class XPUPlatform(Platform):
             parallel_config.worker_cls = "vllm.v1.worker.xpu_worker.XPUWorker"
         if vllm_config.kv_transfer_config is not None:
             vllm_config.kv_transfer_config.enable_permute_local_kv = True
+            # In some cases, the internal memory type cache can misdetect GPU
+            # memory as host memory, also leading to invalid memory access.
+            # This cache can be disabled by setting UCX_MEMTYPE_CACHE=n.
+            # ref. https://openucx.readthedocs.io/en/master/faq.html
+            os.environ["UCX_MEMTYPE_CACHE"] = "n"
 
         if model_config and model_config.use_mla:
             logger.info(
@@ -194,12 +199,6 @@ class XPUPlatform(Platform):
                 vllm_config.model_config.max_model_len,
                 vllm_config.scheduler_config.DEFAULT_MAX_NUM_BATCHED_TOKENS,
             )
-
-        # In some cases, the internal memory type cache can misdetect GPU
-        # memory as host memory, also leading to invalid memory access.
-        # This cache can be disabled by setting UCX_MEMTYPE_CACHE=n.
-        # ref. https://openucx.readthedocs.io/en/master/faq.html
-        os.environ["UCX_MEMTYPE_CACHE"] = "n"
 
     @classmethod
     def support_hybrid_kv_cache(cls) -> bool:
