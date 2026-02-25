@@ -139,7 +139,13 @@ def build_and_install_prerequisites(args):
     if not os.path.exists(UCX_DIR):
         run_command(["git", "clone", UCX_REPO_URL, UCX_DIR])
     ucx_source_path = os.path.abspath(UCX_DIR)
-    # Pin UCX to commit e5d9887 for XPU GDR support until a release includes it.
+    # Pin UCX to a specific, known-good commit instead of tracking a moving
+    # branch (e.g., v1.19.x). Commit e5d9887 is the first revision that
+    # includes Intel Level Zero (ZE) GPU memory registration support, which
+    # is required for GPUDirect RDMA with XPU devices via NIXL. This commit
+    # has been validated with nixl for XPU GDR use cases. If you update this
+    # hash, please ensure the new commit includes ZE support, has been tested
+    # with nixl and GPUDirect RDMA, and update this comment accordingly.
     run_command(["git", "checkout", "e5d9887"], cwd=ucx_source_path)
     run_command(["./autogen.sh"], cwd=ucx_source_path)
     configure_command = [
