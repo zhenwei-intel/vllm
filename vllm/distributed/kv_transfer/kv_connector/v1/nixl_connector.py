@@ -1577,7 +1577,7 @@ class NixlConnectorWorker:
             For dynamic FP8 (calculate_kv_scales=True), scales are computed
             lazily during the first forward pass.  If this method is called
             before any forward pass has run, the returned values will be 1.0
-            (the default initialisation value).  Call
+            (the default initialization value).  Call
             rebuild_xfer_handshake_metadata() after the first forward pass to
             update the handshake metadata with the computed scales.
         """
@@ -1656,6 +1656,15 @@ class NixlConnectorWorker:
         remote_v_scales = nixl_agent_meta.fp8_v_scales
 
         if not remote_k_scales:
+            return
+
+        if len(remote_k_scales) != len(remote_v_scales):
+            logger.warning(
+                "Cannot apply remote fp8 scales: fp8_k_scales length (%d) "
+                "does not match fp8_v_scales length (%d); ignoring.",
+                len(remote_k_scales),
+                len(remote_v_scales),
+            )
             return
 
         if not self.cache_config.cache_dtype.startswith("fp8"):

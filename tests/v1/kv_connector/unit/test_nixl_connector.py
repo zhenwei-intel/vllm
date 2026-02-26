@@ -2550,8 +2550,6 @@ def test_rebuild_xfer_handshake_metadata_updates_fp8_scales(
         connector.register_kv_caches(kv_caches)
 
         # Simulate dynamic fp8 scale computation (first forward pass).
-        import torch
-
         layer_a._k_scale.fill_(0.3)
         layer_a._v_scale.fill_(0.7)
         layer_a._k_scale_float = 0.3
@@ -2568,5 +2566,9 @@ def test_rebuild_xfer_handshake_metadata_updates_fp8_scales(
         )
 
         assert len(agent_meta.fp8_k_scales) == 1
-        assert abs(agent_meta.fp8_k_scales[0] - 0.3) < 1e-6
-        assert abs(agent_meta.fp8_v_scales[0] - 0.7) < 1e-6
+        assert torch.isclose(
+            torch.tensor(agent_meta.fp8_k_scales[0]), torch.tensor(0.3)
+        )
+        assert torch.isclose(
+            torch.tensor(agent_meta.fp8_v_scales[0]), torch.tensor(0.7)
+        )
