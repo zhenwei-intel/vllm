@@ -824,16 +824,6 @@ class NixlConnectorWorker:
         self.world_size = get_tensor_model_parallel_world_size()
         self.tp_group = get_tp_group()
 
-        ze_masks = os.getenv("ZE_AFFINITY_MASK")
-        ze_masks = ze_masks.split(",")
-        curr_mask = int(ze_masks[self.tp_rank])
-        os.environ["UCX_NET_DEVICES"] = f"mlx5_{curr_mask // 2}:1"
-        logger.info("The xpu device currently identified as tp_rank#%d/tp_size#%d will use %s",
-                    self.tp_rank,
-                    self.world_size,
-                    os.getenv("UCX_NET_DEVICES", ""),
-                    )
-
         if vllm_config.kv_transfer_config is None:
             raise ValueError("kv_transfer_config must be set for NixlConnector")
         self.kv_transfer_config = vllm_config.kv_transfer_config
