@@ -12,7 +12,7 @@ import uuid
 from collections import defaultdict
 from collections.abc import Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 import msgspec
@@ -83,8 +83,9 @@ ReqId = str
 # Version History:
 #   1: Initial version with compatibility checking
 #   2: Add remote_request_id to kv_transfer_params
+#   3: Add fp8_k_scales and fp8_v_scales to NixlAgentMetadata for fp8 KV cache
 #
-NIXL_CONNECTOR_VERSION: int = 2
+NIXL_CONNECTOR_VERSION: int = 3
 
 GET_META_MSG = b"get_meta_msg"
 
@@ -158,6 +159,13 @@ class NixlAgentMetadata:
     block_lens: list[int]
     kv_cache_layout: str
     block_size: int
+    # FP8 KV cache quantization scales (one float per attention layer).
+    # Empty list means non-fp8 or scales already match (e.g. static
+    # calibration loaded from model weights on both P and D).
+    # Non-empty list is populated for dynamic fp8 (calculate_kv_scales=True)
+    # or any case where P's scales may differ from D's default.
+    fp8_k_scales: list[float] = field(default_factory=list)
+    fp8_v_scales: list[float] = field(default_factory=list)
 
 
 @dataclass
@@ -1553,6 +1561,7 @@ class NixlConnectorWorker:
         )
 
         # After KV Caches registered, listen for new connections.
+        fp8_k_scales, fp8_v_scales = self._collect_fp8_kv_scales()
         agent_metadata = NixlAgentMetadata(
             engine_id=self.engine_id,
             agent_metadata=self.nixl_wrapper.get_agent_metadata(),
@@ -1564,6 +1573,8 @@ class NixlConnectorWorker:
             if not self.use_host_buffer
             else self.host_buffer_kv_cache_layout,
             block_size=self.block_size,
+            fp8_k_scales=fp8_k_scales,
+            fp8_v_scales=fp8_v_scales,
         )
         # Wrap metadata in payload with hash for defensive decoding
         assert self.compat_hash is not None
@@ -1627,6 +1638,151 @@ class NixlConnectorWorker:
         descs = self.nixl_wrapper.get_xfer_descs(blocks_data, self.nixl_memory_type)
         # NIXL_INIT_AGENT to be used for preparations of local descs.
         return self.nixl_wrapper.prep_xfer_dlist("NIXL_INIT_AGENT", descs), blocks_data
+
+    def _collect_fp8_kv_scales(self) -> tuple[list[float], list[float]]:
+        """
+        Collect per-layer FP8 KV cache quantization scales from the attention
+        layers in the static forward context.
+
+        Returns:
+            A tuple (fp8_k_scales, fp8_v_scales) where each is a list of
+            per-layer float scale values sorted by layer name.  Both lists
+            are empty when the KV cache dtype is not FP8.
+
+        Note:
+            For dynamic FP8 (calculate_kv_scales=True), scales are computed
+            lazily during the first forward pass.  If this method is called
+            before any forward pass has run, the returned values will be 1.0
+            (the default initialization value).  Call
+            rebuild_xfer_handshake_metadata() after the first forward pass to
+            update the handshake metadata with the computed scales.
+        """
+        if not self.cache_config.cache_dtype.startswith("fp8"):
+            return [], []
+
+        static_ctx = self.vllm_config.compilation_config.static_forward_context
+        if not static_ctx:
+            logger.debug(
+                "static_forward_context is empty; fp8 scales will not be "
+                "included in handshake metadata."
+            )
+            return [], []
+
+        fp8_k_scales: list[float] = []
+        fp8_v_scales: list[float] = []
+        for name in sorted(static_ctx.keys()):
+            module = static_ctx[name]
+            if hasattr(module, "_k_scale") and hasattr(module, "_v_scale"):
+                fp8_k_scales.append(module._k_scale.item())
+                fp8_v_scales.append(module._v_scale.item())
+
+        logger.debug(
+            "Collected %d fp8 KV scale pairs for handshake metadata.",
+            len(fp8_k_scales),
+        )
+        return fp8_k_scales, fp8_v_scales
+
+    def rebuild_xfer_handshake_metadata(self) -> None:
+        """
+        Rebuild the handshake metadata with the current FP8 KV scales.
+
+        This should be called after dynamic FP8 scales have been computed
+        (i.e., after the first forward pass when calculate_kv_scales=True).
+        Subsequent D-side handshakes will then receive the correct scales.
+        """
+        if self.xfer_handshake_metadata is None:
+            return
+
+        # Re-decode the existing metadata to preserve all other fields.
+        metadata_decoder = msgspec.msgpack.Decoder(NixlAgentMetadata)
+        agent_metadata = metadata_decoder.decode(
+            self.xfer_handshake_metadata.agent_metadata_bytes
+        )
+
+        fp8_k_scales, fp8_v_scales = self._collect_fp8_kv_scales()
+        agent_metadata.fp8_k_scales = fp8_k_scales
+        agent_metadata.fp8_v_scales = fp8_v_scales
+
+        encoder = msgspec.msgpack.Encoder()
+        assert self.compat_hash is not None
+        self.xfer_handshake_metadata = NixlHandshakePayload(
+            compatibility_hash=self.compat_hash,
+            agent_metadata_bytes=encoder.encode(agent_metadata),
+        )
+        logger.debug(
+            "Rebuilt handshake metadata with %d fp8 scale pairs.",
+            len(fp8_k_scales),
+        )
+
+    def _apply_fp8_kv_scales(self, nixl_agent_meta: NixlAgentMetadata) -> None:
+        """
+        Apply the FP8 KV cache quantization scales received from the remote
+        (P-side) agent to the local (D-side) attention layers.
+
+        The scales are applied only when:
+        - The remote metadata contains non-empty fp8 scale lists.
+        - The local KV cache dtype is FP8.
+        - The number of remote scales matches the number of local attention
+          layers that expose ``_k_scale`` / ``_v_scale`` attributes.
+
+        Args:
+            nixl_agent_meta: Metadata received from the remote P-side agent.
+        """
+        remote_k_scales = nixl_agent_meta.fp8_k_scales
+        remote_v_scales = nixl_agent_meta.fp8_v_scales
+
+        if not remote_k_scales:
+            return
+
+        if len(remote_k_scales) != len(remote_v_scales):
+            logger.warning(
+                "Cannot apply remote fp8 scales: fp8_k_scales length (%d) "
+                "does not match fp8_v_scales length (%d); ignoring.",
+                len(remote_k_scales),
+                len(remote_v_scales),
+            )
+            return
+
+        if not self.cache_config.cache_dtype.startswith("fp8"):
+            logger.warning(
+                "Received fp8 KV scales from remote but local cache dtype is "
+                "%s; ignoring received scales.",
+                self.cache_config.cache_dtype,
+            )
+            return
+
+        static_ctx = self.vllm_config.compilation_config.static_forward_context
+        local_attn_names = sorted(
+            name
+            for name, module in static_ctx.items()
+            if hasattr(module, "_k_scale") and hasattr(module, "_v_scale")
+        )
+
+        if len(local_attn_names) != len(remote_k_scales):
+            logger.warning(
+                "Cannot apply remote fp8 scales: remote has %d scale entries "
+                "but local has %d attention layers with fp8 scales.",
+                len(remote_k_scales),
+                len(local_attn_names),
+            )
+            return
+
+        for name, k_scale, v_scale in zip(
+            local_attn_names, remote_k_scales, remote_v_scales
+        ):
+            module = static_ctx[name]
+            module._k_scale.fill_(k_scale)
+            module._v_scale.fill_(v_scale)
+            if hasattr(module, "_k_scale_float"):
+                module._k_scale_float = k_scale
+            if hasattr(module, "_v_scale_float"):
+                module._v_scale_float = v_scale
+
+        logger.debug(
+            "Applied %d fp8 KV scale pairs from remote agent %s.",
+            len(remote_k_scales),
+            nixl_agent_meta.engine_id,
+        )
 
     def add_remote_agent(
         self,
@@ -1818,6 +1974,12 @@ class NixlConnectorWorker:
             self.src_xfer_handles_by_block_size[nixl_agent_meta.block_size] = (
                 self.register_local_xfer_handler(nixl_agent_meta.block_size)[0]
             )
+
+        # Apply fp8 KV cache quantization scales from the remote P-side agent.
+        # This is a no-op when remote metadata contains no fp8 scales (e.g.
+        # bf16 KV cache) or when P and D already share the same calibrated
+        # scales (static fp8 from quantized model weights).
+        self._apply_fp8_kv_scales(nixl_agent_meta)
 
         return remote_agent_name
 
