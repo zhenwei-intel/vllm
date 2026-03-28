@@ -1983,9 +1983,52 @@ def scaled_int8_quant(
 
 
 # gguf
+
+
+def _ggml_dequantize_xpu(
+    W: torch.Tensor,
+    quant_type: int,
+    m: int,
+    n: int,
+    dtype: torch.dtype | None,
+) -> torch.Tensor:
+    """XPU dequantization: use the native SYCL kernel when available,
+    otherwise fall back to the Python ``gguf`` library (CPU dequantize →
+    move to device).  The fallback supports every quantization type that
+    the Python library understands, so all GGUF types work on XPU even
+    before the SYCL kernel is compiled into vllm_xpu_kernels."""
+    dtype_ = dtype or torch.float16
+    # Fast path: native SYCL kernel registered in vllm_xpu_kernels._xpu_C
+    _xpu_C = getattr(torch.ops, "_xpu_C", None)
+    if _xpu_C is not None and hasattr(_xpu_C, "ggml_dequantize_xpu"):
+        return _xpu_C.ggml_dequantize_xpu(W, quant_type, m, n, dtype_)
+    # Fallback: CPU dequantize via Python gguf library.
+    # Lazy import to avoid pulling gguf into non-GGUF startup paths.
+    import gguf as gguf_lib
+
+    quant_type_enum = gguf_lib.GGMLQuantizationType(quant_type)
+    # Move quantized bytes to CPU and expose as numpy
+    W_np = W.cpu().numpy()
+    # gguf_lib.dequantize returns a float32 numpy array of shape (m * n,)
+    result_np = gguf_lib.dequantize(W_np, quant_type_enum)
+    result = torch.from_numpy(result_np).view(m, n).to(dtype=dtype_)
+    # Return on the original XPU device
+    return result.to(device=W.device)
+
+
+def _xpu_weight_n(W: torch.Tensor, quant_type: int) -> int:
+    """Compute the number of dequantized columns from a quantized weight row."""
+    import gguf as gguf_lib
+
+    block_size, type_size = gguf_lib.GGML_QUANT_SIZES[quant_type]
+    return W.shape[1] // type_size * block_size
+
+
 def ggml_dequantize(
     W: torch.Tensor, quant_type: int, m: int, n: int, dtype: torch.dtype | None
 ) -> torch.Tensor:
+    if current_platform.is_xpu():
+        return _ggml_dequantize_xpu(W, quant_type, m, n, dtype)
     return torch.ops._C.ggml_dequantize(W, quant_type, m, n, dtype)
 
 
@@ -1995,6 +2038,11 @@ def ggml_mul_mat_vec_a8(
     quant_type: int,
     row: int,
 ) -> torch.Tensor:
+    if current_platform.is_xpu():
+        # XPU does not have an MMVQ kernel; dequantize and use torch matmul
+        n = _xpu_weight_n(W, quant_type)
+        weight = _ggml_dequantize_xpu(W, quant_type, row, n, X.dtype)
+        return X @ weight.T
     return torch.ops._C.ggml_mul_mat_vec_a8(W, X, quant_type, row)
 
 
@@ -2004,6 +2052,11 @@ def ggml_mul_mat_a8(
     quant_type: int,
     row: int,
 ) -> torch.Tensor:
+    if current_platform.is_xpu():
+        # XPU does not have an MMQ kernel; dequantize and use torch matmul
+        n = _xpu_weight_n(W, quant_type)
+        weight = _ggml_dequantize_xpu(W, quant_type, row, n, X.dtype)
+        return X @ weight.T
     return torch.ops._C.ggml_mul_mat_a8(W, X, quant_type, row)
 
 

@@ -199,6 +199,13 @@ def _fused_mul_mat_gguf(
     # there is no need to call any kernel for fp16/bf16
     if qweight_type in UNQUANTIZED_TYPES:
         return x @ qweight.T
+    # XPU does not have MMQ/MMVQ SYCL kernels yet; always use the
+    # dequantize + torch.matmul path (ops.ggml_dequantize handles XPU).
+    if current_platform.is_xpu() and qweight_type in DEQUANT_TYPES:
+        block_size, type_size = gguf.GGML_QUANT_SIZES[qweight_type]
+        shape = (qweight.shape[0], qweight.shape[1] // type_size * block_size)
+        weight = ops.ggml_dequantize(qweight, qweight_type, *shape, x.dtype)
+        return x @ weight.T
     # enable MMVQ in contiguous batching with batch_size=1
     if x.shape[0] <= mmvq_safe and qweight_type in MMVQ_QUANT_TYPES:
         y = ops.ggml_mul_mat_vec_a8(qweight, x, qweight_type, qweight.shape[0])
