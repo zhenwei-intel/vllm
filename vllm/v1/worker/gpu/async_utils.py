@@ -76,6 +76,7 @@ class AsyncOutput(AsyncModelRunnerOutput):
         main_stream: torch.cuda.Stream,
         copy_stream: torch.cuda.Stream,
         copy_event: torch.cuda.Event,
+        ttft_request_arrival_times: dict[str, float] | None = None,
     ):
         # NOTE(woosuk): We must retain references to the GPU tensors,
         # as the copy operations are performed on a different CUDA stream than
@@ -84,6 +85,7 @@ class AsyncOutput(AsyncModelRunnerOutput):
         self.sampler_output = sampler_output
         self.num_sampled_tokens = num_sampled_tokens
         self.copy_event = copy_event
+        self.ttft_request_arrival_times = ttft_request_arrival_times or {}
 
         _log_async_output("init_enter", self.model_runner_output.req_ids)
 
@@ -172,11 +174,18 @@ class AsyncOutput(AsyncModelRunnerOutput):
         sync_start = time.perf_counter()
         _log_async_output("get_output_enter", self.model_runner_output.req_ids)
         self.copy_event.synchronize()
+        output_ready_time = time.time()
         _log_async_output(
             "get_output_after_sync",
             self.model_runner_output.req_ids,
             wait_ms=round((time.perf_counter() - sync_start) * 1000, 3),
         )
+        for req_id, arrival_time in self.ttft_request_arrival_times.items():
+            _log_async_output(
+                "prefill_ttft_ready",
+                [req_id],
+                prefill_ttft_ms=round((output_ready_time - arrival_time) * 1000, 3),
+            )
 
         # NOTE(woosuk): The following code is to ensure compatibility with
         # the existing model runner.

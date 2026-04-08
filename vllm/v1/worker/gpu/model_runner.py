@@ -134,6 +134,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.use_async_scheduling = self.scheduler_config.async_scheduling
         self.output_copy_stream = torch.cuda.Stream(self.device)
         self.output_copy_event = torch.cuda.Event()
+        self.req_id_to_arrival_time: dict[str, float] = {}
+        self.pending_prefill_ttft_req_ids: set[str] = set()
 
         # Pipeline parallelism.
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
@@ -588,6 +590,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def _remove_request(self, req_id: str) -> bool:
         if not self.req_states.remove_request(req_id):
             return False
+        self.req_id_to_arrival_time.pop(req_id, None)
+        self.pending_prefill_ttft_req_ids.discard(req_id)
         if self.encoder_cache is not None:
             self.encoder_cache.remove_request(req_id)
         if self.prompt_logprobs_worker is not None:
@@ -626,6 +630,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 all_token_ids=new_req_data.prefill_token_ids,
                 num_computed_tokens=new_req_data.num_computed_tokens,
             )
+            self.req_id_to_arrival_time[req_id] = new_req_data.arrival_time
+            self.pending_prefill_ttft_req_ids.add(req_id)
             req_index = self.req_states.req_id_to_index[req_id]
 
             if self.encoder_cache is not None:
@@ -1168,6 +1174,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             prompt_logprobs_dict=prompt_logprobs_dict,  # type: ignore[arg-type]
             kv_connector_output=kv_connector_output,
         )
+        ttft_request_arrival_times = {
+            req_id: self.req_id_to_arrival_time[req_id]
+            for req_id in input_batch.req_ids
+            if req_id in self.pending_prefill_ttft_req_ids
+            and req_id in self.req_id_to_arrival_time
+        }
+        self.pending_prefill_ttft_req_ids.difference_update(
+            ttft_request_arrival_times.keys())
         async_output = AsyncOutput(
             model_runner_output=model_runner_output,
             sampler_output=sampler_output,
@@ -1175,6 +1189,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             main_stream=self.main_stream,
             copy_stream=self.output_copy_stream,
             copy_event=self.output_copy_event,
+            ttft_request_arrival_times=ttft_request_arrival_times,
         )
 
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None

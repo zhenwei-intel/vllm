@@ -30,6 +30,7 @@ else:
 @dataclass
 class NewRequestData:
     req_id: str
+    arrival_time: float
     prompt_token_ids: list[int] | None
     mm_features: list[MultiModalFeatureSpec]
     sampling_params: SamplingParams | None
@@ -51,6 +52,7 @@ class NewRequestData:
     ) -> "NewRequestData":
         return cls(
             req_id=request.request_id,
+            arrival_time=request.arrival_time,
             prompt_token_ids=request.prompt_token_ids,
             mm_features=request.mm_features,
             sampling_params=request.sampling_params,
@@ -69,6 +71,7 @@ class NewRequestData:
         return (
             f"NewRequestData("
             f"req_id={self.req_id},"
+            f"arrival_time={self.arrival_time},"
             f"prompt_token_ids={self.prompt_token_ids},"
             f"prefill_token_ids={self.prefill_token_ids},"
             f"mm_features={self.mm_features},"
@@ -94,6 +97,7 @@ class NewRequestData:
         return (
             f"NewRequestData("
             f"req_id={self.req_id},"
+            f"arrival_time={self.arrival_time},"
             f"prompt_token_ids_len={prompt_token_ids_len},"
             f"prefill_token_ids_len={prefill_token_ids_len},"
             f"mm_features={self.mm_features},"
