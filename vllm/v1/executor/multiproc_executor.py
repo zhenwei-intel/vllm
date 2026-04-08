@@ -63,6 +63,8 @@ from vllm.v1.worker.worker_base import WorkerWrapperBase
 
 logger = init_logger(__name__)
 
+_DEBUG_ASYNC_OUTPUT = os.getenv("VLLM_DEBUG_ASYNC_OUTPUT", "0") == "1"
+
 
 class FutureWrapper(Future):
     def __init__(
@@ -890,6 +892,13 @@ class WorkerProc:
         worker_response_mq. If the output is an Exception, it is
         converted to a FAILURE response.
         """
+        if _DEBUG_ASYNC_OUTPUT:
+            logger.warning(
+                "ASYNC_OUTPUT_DBG event=enqueue_output_enter ts=%.6f rank=%s type=%s",
+                time.perf_counter(),
+                self.rank,
+                type(output).__name__,
+            )
         if isinstance(output, AsyncModelRunnerOutput):
             output = output.get_output()
 
@@ -899,12 +908,27 @@ class WorkerProc:
             result = (WorkerProc.ResponseStatus.SUCCESS, output)
         if (response_mq := self.worker_response_mq) is not None:
             response_mq.enqueue(result)
+            if _DEBUG_ASYNC_OUTPUT:
+                logger.warning(
+                    "ASYNC_OUTPUT_DBG event=enqueue_output_done ts=%.6f rank=%s status=%s",
+                    time.perf_counter(),
+                    self.rank,
+                    result[0].name,
+                )
 
     def handle_output(self, output: Any):
         """Handles output from the worker. If async scheduling is enabled,
         it is passed to the async_output_busy_loop thread. Otherwise, it is
         enqueued directly to the worker_response_mq.
         """
+        if _DEBUG_ASYNC_OUTPUT:
+            logger.warning(
+                "ASYNC_OUTPUT_DBG event=handle_output ts=%.6f rank=%s async=%s type=%s",
+                time.perf_counter(),
+                self.rank,
+                self.use_async_scheduling,
+                type(output).__name__,
+            )
         if self.use_async_scheduling:
             self.async_output_queue.put(output)
         else:
@@ -926,6 +950,14 @@ class WorkerProc:
 
         while True:
             output = self.async_output_queue.get()
+            if _DEBUG_ASYNC_OUTPUT:
+                logger.warning(
+                    "ASYNC_OUTPUT_DBG event=async_output_thread_got_item ts=%.6f rank=%s thread=%s type=%s",
+                    time.perf_counter(),
+                    self.rank,
+                    threading.current_thread().name,
+                    type(output).__name__,
+                )
             self.enqueue_output(output)
 
     def worker_busy_loop(self):

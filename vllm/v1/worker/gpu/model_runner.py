@@ -19,6 +19,7 @@ instead of embedding feature-specific logic directly.
 
 import functools
 import gc
+import os
 import time
 from copy import deepcopy
 from typing import Any, NamedTuple
@@ -98,6 +99,8 @@ from vllm.v1.worker.gpu.structured_outputs import StructuredOutputsWorker
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 
 logger = init_logger(__name__)
+
+_DEBUG_ASYNC_OUTPUT = os.getenv("VLLM_DEBUG_ASYNC_OUTPUT", "0") == "1"
 
 
 class GPUModelRunner(LoRAModelRunnerMixin):
@@ -1222,6 +1225,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.draft_tokens_handler.set_draft_tokens(input_batch, draft_tokens)
 
         if self.use_async_scheduling:
+            if _DEBUG_ASYNC_OUTPUT:
+                logger.warning(
+                    "ASYNC_OUTPUT_DBG event=sample_done_return_async ts=%.6f req_ids=%s num_tokens=%s",
+                    time.perf_counter(),
+                    input_batch.req_ids[:4],
+                    input_batch.num_tokens,
+                )
             return async_output
         return async_output.get_output()
 
@@ -1266,6 +1276,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         self.postprocess_pool(input_batch)
         if self.use_async_scheduling:
+            if _DEBUG_ASYNC_OUTPUT:
+                logger.warning(
+                    "ASYNC_OUTPUT_DBG event=pool_done_return_async ts=%.6f req_ids=%s num_tokens=%s",
+                    time.perf_counter(),
+                    input_batch.req_ids[:4],
+                    input_batch.num_tokens,
+                )
             return async_output
         return async_output.get_output()
 

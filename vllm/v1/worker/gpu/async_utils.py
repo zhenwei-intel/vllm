@@ -1,12 +1,29 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
+import os
+import time
 
 import numpy as np
 import torch
 
+from vllm.logger import init_logger
 from vllm.v1.outputs import AsyncModelRunnerOutput, LogprobsTensors, ModelRunnerOutput
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
+
+logger = init_logger(__name__)
+
+_DEBUG_ASYNC_OUTPUT = os.getenv("VLLM_DEBUG_ASYNC_OUTPUT", "0") == "1"
+
+
+def _log_async_output(event: str,
+                      req_ids: list[str],
+                      **fields: float | int | str | bool) -> None:
+    if not _DEBUG_ASYNC_OUTPUT:
+        return
+    details = " ".join(f"{k}={v}" for k, v in fields.items())
+    logger.warning("ASYNC_OUTPUT_DBG event=%s ts=%.6f req_ids=%s %s",
+                   event, time.perf_counter(), req_ids[:4], details)
 
 
 class AsyncOutput(AsyncModelRunnerOutput):
@@ -27,6 +44,8 @@ class AsyncOutput(AsyncModelRunnerOutput):
         self.num_sampled_tokens = num_sampled_tokens
         self.copy_event = copy_event
 
+        _log_async_output("init_enter", self.model_runner_output.req_ids)
+
         with stream(copy_stream, main_stream):
             copy_stream.wait_stream(main_stream)
 
@@ -45,9 +64,17 @@ class AsyncOutput(AsyncModelRunnerOutput):
                 for k, v in self.model_runner_output.prompt_logprobs_dict.items()
             }
             self.copy_event.record(copy_stream)
+            _log_async_output("copy_recorded", self.model_runner_output.req_ids)
 
     def get_output(self) -> ModelRunnerOutput:
+        sync_start = time.perf_counter()
+        _log_async_output("get_output_enter", self.model_runner_output.req_ids)
         self.copy_event.synchronize()
+        _log_async_output(
+            "get_output_after_sync",
+            self.model_runner_output.req_ids,
+            wait_ms=round((time.perf_counter() - sync_start) * 1000, 3),
+        )
 
         # NOTE(woosuk): The following code is to ensure compatibility with
         # the existing model runner.
@@ -67,6 +94,7 @@ class AsyncOutput(AsyncModelRunnerOutput):
         if self.logprobs_tensors is not None:
             self.model_runner_output.logprobs = self.logprobs_tensors.tolists()
         self.model_runner_output.prompt_logprobs_dict = self.prompt_logprobs_dict
+        _log_async_output("get_output_return", self.model_runner_output.req_ids)
         return self.model_runner_output
 
 
