@@ -16,55 +16,14 @@ logger = init_logger(__name__)
 _DEBUG_ASYNC_OUTPUT = os.getenv("VLLM_DEBUG_ASYNC_OUTPUT", "0") == "1"
 
 
-def _log_async_output(
-    event: str, req_ids: list[str], **fields: float | int | str | bool
-) -> None:
+def _log_async_output(event: str,
+                      req_ids: list[str],
+                      **fields: float | int | str | bool) -> None:
     if not _DEBUG_ASYNC_OUTPUT:
         return
     details = " ".join(f"{k}={v}" for k, v in fields.items())
-    logger.warning(
-        "ASYNC_OUTPUT_DBG event=%s ts=%.6f req_ids=%s %s",
-        event,
-        time.perf_counter(),
-        req_ids[:4],
-        details,
-    )
-
-
-def _tensor_copy_fields(x: torch.Tensor) -> dict[str, str | int]:
-    return {
-        "shape": str(tuple(x.shape)),
-        "numel": x.numel(),
-        "bytes": x.numel() * x.element_size(),
-        "dtype": str(x.dtype),
-    }
-
-
-def _log_copy_enqueue_start(
-    req_ids: list[str], label: str, x: torch.Tensor | None = None, **fields: object
-) -> float:
-    if x is not None:
-        fields = {**_tensor_copy_fields(x), **fields}
-    _log_async_output(
-        f"copy_enqueue_start:{label}",
-        req_ids,
-        **{k: str(v) if not isinstance(v, (int, float, bool)) else v for k, v in fields.items()},
-    )
-    return time.perf_counter()
-
-
-def _log_copy_enqueue_done(req_ids: list[str], label: str, start: float,
-                           **fields: object) -> None:
-    serialized_fields = {
-        k: str(v) if not isinstance(v, (int, float, bool)) else v
-        for k, v in fields.items()
-    }
-    _log_async_output(
-        f"copy_enqueue_done:{label}",
-        req_ids,
-        enqueue_ms=round((time.perf_counter() - start) * 1000, 3),
-        **serialized_fields,
-    )
+    logger.warning("ASYNC_OUTPUT_DBG event=%s ts=%.6f req_ids=%s %s",
+                   event, time.perf_counter(), req_ids[:4], details)
 
 
 class AsyncOutput(AsyncModelRunnerOutput):
@@ -92,81 +51,20 @@ class AsyncOutput(AsyncModelRunnerOutput):
         with stream(copy_stream, main_stream):
             copy_stream.wait_stream(main_stream)
 
-            copy_start = _log_copy_enqueue_start(
-                self.model_runner_output.req_ids,
-                "sampled_token_ids",
-                sampler_output.sampled_token_ids,
-            )
             self.sampled_token_ids = async_copy_to_np(sampler_output.sampled_token_ids)
-            _log_copy_enqueue_done(
-                self.model_runner_output.req_ids,
-                "sampled_token_ids",
-                copy_start,
-            )
-
             self.logprobs_tensors: LogprobsTensors | None = None
             if sampler_output.logprobs_tensors is not None:
-                copy_start = _log_copy_enqueue_start(
-                    self.model_runner_output.req_ids,
-                    "logprobs_tensors",
-                )
                 self.logprobs_tensors = (
                     sampler_output.logprobs_tensors.to_cpu_nonblocking()
                 )
-                _log_copy_enqueue_done(
-                    self.model_runner_output.req_ids,
-                    "logprobs_tensors",
-                    copy_start,
-                )
-
             self.num_nans: np.ndarray | None = None
             if sampler_output.num_nans is not None:
-                copy_start = _log_copy_enqueue_start(
-                    self.model_runner_output.req_ids,
-                    "num_nans",
-                    sampler_output.num_nans,
-                )
                 self.num_nans = async_copy_to_np(sampler_output.num_nans)
-                _log_copy_enqueue_done(
-                    self.model_runner_output.req_ids,
-                    "num_nans",
-                    copy_start,
-                )
-
-            copy_start = _log_copy_enqueue_start(
-                self.model_runner_output.req_ids,
-                "num_sampled_tokens",
-                num_sampled_tokens,
-            )
             self.num_sampled_tokens_np = async_copy_to_np(num_sampled_tokens)
-            _log_copy_enqueue_done(
-                self.model_runner_output.req_ids,
-                "num_sampled_tokens",
-                copy_start,
-            )
-
-            prompt_logprobs_count = len(self.model_runner_output.prompt_logprobs_dict)
-            prompt_logprobs_non_null = sum(
-                value is not None
-                for value in self.model_runner_output.prompt_logprobs_dict.values()
-            )
-            copy_start = _log_copy_enqueue_start(
-                self.model_runner_output.req_ids,
-                "prompt_logprobs_dict",
-                entries=prompt_logprobs_count,
-                non_null_entries=prompt_logprobs_non_null,
-            )
             self.prompt_logprobs_dict = {
                 k: v.to_cpu_nonblocking() if v is not None else None
                 for k, v in self.model_runner_output.prompt_logprobs_dict.items()
             }
-            _log_copy_enqueue_done(
-                self.model_runner_output.req_ids,
-                "prompt_logprobs_dict",
-                copy_start,
-                entries=prompt_logprobs_count,
-                non_null_entries=prompt_logprobs_non_null,
-            )
             self.copy_event.record(copy_stream)
             _log_async_output("copy_recorded", self.model_runner_output.req_ids)
 
