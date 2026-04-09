@@ -36,6 +36,7 @@ class AsyncOutput(AsyncModelRunnerOutput):
         copy_stream: torch.cuda.Stream,
         copy_event: torch.cuda.Event,
         ttft_request_arrival_times: dict[str, float] | None = None,
+        req_id_to_last_output_ready_time: dict[str, float] | None = None,
     ):
         # NOTE(woosuk): We must retain references to the GPU tensors,
         # as the copy operations are performed on a different CUDA stream than
@@ -45,6 +46,9 @@ class AsyncOutput(AsyncModelRunnerOutput):
         self.num_sampled_tokens = num_sampled_tokens
         self.copy_event = copy_event
         self.ttft_request_arrival_times = ttft_request_arrival_times or {}
+        self.req_id_to_last_output_ready_time = (
+            req_id_to_last_output_ready_time
+            if req_id_to_last_output_ready_time is not None else {})
 
         _log_async_output("init_enter", self.model_runner_output.req_ids)
 
@@ -91,6 +95,18 @@ class AsyncOutput(AsyncModelRunnerOutput):
         # rather than Python lists.
         sampled_token_ids: list[list[int]] = self.sampled_token_ids.tolist()
         num_sampled_tokens: list[int] = self.num_sampled_tokens_np.tolist()
+        for req_id, sampled_count in zip(self.model_runner_output.req_ids,
+                                         num_sampled_tokens):
+            prev_output_ready_time = self.req_id_to_last_output_ready_time.get(req_id)
+            if prev_output_ready_time is not None:
+                _log_async_output(
+                    "decode_tpot_ready",
+                    [req_id],
+                    decode_tpot_ms=round(
+                        (output_ready_time - prev_output_ready_time) * 1000, 3),
+                    num_tokens=sampled_count,
+                )
+            self.req_id_to_last_output_ready_time[req_id] = output_ready_time
         for token_ids, num_tokens in zip(sampled_token_ids, num_sampled_tokens):
             del token_ids[num_tokens:]
         self.model_runner_output.sampled_token_ids = sampled_token_ids

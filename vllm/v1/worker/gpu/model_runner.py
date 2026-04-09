@@ -135,6 +135,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.output_copy_stream = torch.cuda.Stream(self.device)
         self.output_copy_event = torch.cuda.Event()
         self.req_id_to_arrival_time: dict[str, float] = {}
+        self.req_id_to_last_output_ready_time: dict[str, float] = {}
         self.pending_prefill_ttft_req_ids: set[str] = set()
 
         # Pipeline parallelism.
@@ -591,6 +592,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if not self.req_states.remove_request(req_id):
             return False
         self.req_id_to_arrival_time.pop(req_id, None)
+        self.req_id_to_last_output_ready_time.pop(req_id, None)
         self.pending_prefill_ttft_req_ids.discard(req_id)
         if self.encoder_cache is not None:
             self.encoder_cache.remove_request(req_id)
@@ -1190,6 +1192,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             copy_stream=self.output_copy_stream,
             copy_event=self.output_copy_event,
             ttft_request_arrival_times=ttft_request_arrival_times,
+            req_id_to_last_output_ready_time=self.req_id_to_last_output_ready_time,
         )
 
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None
