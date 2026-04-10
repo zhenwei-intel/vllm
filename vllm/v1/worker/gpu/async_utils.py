@@ -16,14 +16,19 @@ logger = init_logger(__name__)
 _DEBUG_ASYNC_OUTPUT = os.getenv("VLLM_DEBUG_ASYNC_OUTPUT", "0") == "1"
 
 
-def _log_async_output(event: str,
-                      req_ids: list[str],
-                      **fields: float | int | str | bool) -> None:
+def _log_async_output(
+    event: str, req_ids: list[str], **fields: float | int | str | bool
+) -> None:
     if not _DEBUG_ASYNC_OUTPUT:
         return
     details = " ".join(f"{k}={v}" for k, v in fields.items())
-    logger.warning("ASYNC_OUTPUT_DBG event=%s ts=%.6f req_ids=%s %s",
-                   event, time.perf_counter(), req_ids[:4], details)
+    logger.warning(
+        "ASYNC_OUTPUT_DBG event=%s ts=%.6f req_ids=%s %s",
+        event,
+        time.perf_counter(),
+        req_ids[:4],
+        details,
+    )
 
 
 class AsyncOutput(AsyncModelRunnerOutput):
@@ -34,7 +39,6 @@ class AsyncOutput(AsyncModelRunnerOutput):
         num_sampled_tokens: torch.Tensor,
         main_stream: torch.cuda.Stream,
         copy_stream: torch.cuda.Stream,
-        copy_event: torch.cuda.Event,
         ttft_request_arrival_times: dict[str, float] | None = None,
         req_id_to_last_output_ready_time: dict[str, float] | None = None,
     ):
@@ -44,11 +48,13 @@ class AsyncOutput(AsyncModelRunnerOutput):
         self.model_runner_output = model_runner_output
         self.sampler_output = sampler_output
         self.num_sampled_tokens = num_sampled_tokens
-        self.copy_event = copy_event
+        self.copy_event = torch.xpu.Event()
         self.ttft_request_arrival_times = ttft_request_arrival_times or {}
         self.req_id_to_last_output_ready_time = (
             req_id_to_last_output_ready_time
-            if req_id_to_last_output_ready_time is not None else {})
+            if req_id_to_last_output_ready_time is not None
+            else {}
+        )
 
         _log_async_output("init_enter", self.model_runner_output.req_ids)
 
@@ -95,15 +101,19 @@ class AsyncOutput(AsyncModelRunnerOutput):
         # rather than Python lists.
         sampled_token_ids: list[list[int]] = self.sampled_token_ids.tolist()
         num_sampled_tokens: list[int] = self.num_sampled_tokens_np.tolist()
-        for req_id, sampled_count in zip(self.model_runner_output.req_ids,
-                                         num_sampled_tokens):
+        print("===== sampled_token_ids: \n", sampled_token_ids)
+        print("===== num_sampled_tokens: \n", num_sampled_tokens)
+        for req_id, sampled_count in zip(
+            self.model_runner_output.req_ids, num_sampled_tokens
+        ):
             prev_output_ready_time = self.req_id_to_last_output_ready_time.get(req_id)
             if prev_output_ready_time is not None:
                 _log_async_output(
                     "decode_tpot_ready",
                     [req_id],
                     decode_tpot_ms=round(
-                        (output_ready_time - prev_output_ready_time) * 1000, 3),
+                        (output_ready_time - prev_output_ready_time) * 1000, 3
+                    ),
                     num_tokens=sampled_count,
                 )
             self.req_id_to_last_output_ready_time[req_id] = output_ready_time
@@ -131,12 +141,11 @@ class AsyncPoolingOutput(AsyncModelRunnerOutput):
         is_valid: torch.Tensor | None,
         main_stream: torch.cuda.Stream,
         copy_stream: torch.cuda.Stream,
-        copy_event: torch.cuda.Event,
     ):
         self.model_runner_output = model_runner_output
         self.pooler_output = pooler_output
         self.is_valid = is_valid
-        self.copy_event = copy_event
+        self.copy_event = torch.xpu.Event()
 
         with stream(copy_stream, main_stream):
             copy_stream.wait_stream(main_stream)

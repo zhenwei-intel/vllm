@@ -133,7 +133,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         self.use_async_scheduling = self.scheduler_config.async_scheduling
         self.output_copy_stream = torch.cuda.Stream(self.device)
-        self.output_copy_event = torch.cuda.Event()
         self.req_id_to_arrival_time: dict[str, float] = {}
         self.req_id_to_last_output_ready_time: dict[str, float] = {}
         self.pending_prefill_ttft_req_ids: set[str] = set()
@@ -1183,14 +1182,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             and req_id in self.req_id_to_arrival_time
         }
         self.pending_prefill_ttft_req_ids.difference_update(
-            ttft_request_arrival_times.keys())
+            ttft_request_arrival_times.keys()
+        )
         async_output = AsyncOutput(
             model_runner_output=model_runner_output,
             sampler_output=sampler_output,
             num_sampled_tokens=num_sampled,
             main_stream=self.main_stream,
             copy_stream=self.output_copy_stream,
-            copy_event=self.output_copy_event,
             ttft_request_arrival_times=ttft_request_arrival_times,
             req_id_to_last_output_ready_time=self.req_id_to_last_output_ready_time,
         )
@@ -1289,7 +1288,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             is_valid=is_valid,
             main_stream=self.main_stream,
             copy_stream=self.output_copy_stream,
-            copy_event=self.output_copy_event,
         )
 
         self.postprocess_pool(input_batch)
