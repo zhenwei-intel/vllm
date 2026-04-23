@@ -1,11 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import logging
+import os
 import threading
 from weakref import WeakValueDictionary
 
 import torch
 import torch.distributed as dist
 from torch.distributed import ProcessGroup
+
+logger = logging.getLogger(__name__)
+
+# DEBUG ONLY: set VLLM_SKIP_TP_COMM=1 to bypass TP communication.
+# Results will be numerically WRONG. Only use for profiling.
+_SKIP_TP_COMM = os.environ.get("VLLM_SKIP_TP_COMM", "0") == "1"
+if _SKIP_TP_COMM:
+    logger.warning("VLLM_SKIP_TP_COMM=1: TP communication is DISABLED. "
+                    "Results will be numerically incorrect!")
 
 
 class Cache:
@@ -176,6 +187,8 @@ class DeviceCommunicatorBase:
         self.all2all_manager: All2AllManagerBase | None = None
 
     def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
+        if _SKIP_TP_COMM:
+            return input_
         dist.all_reduce(input_, group=self.device_group)
         return input_
 
@@ -193,7 +206,12 @@ class DeviceCommunicatorBase:
             output_size, dtype=input_.dtype, device=input_.device
         )
         # All-gather.
-        dist.all_gather_into_tensor(output_tensor, input_, group=self.device_group)
+        if _SKIP_TP_COMM:
+            # Fill with local data repeated, preserving shape
+            for i in range(self.world_size):
+                output_tensor[i * input_size[0]:(i + 1) * input_size[0]] = input_
+        else:
+            dist.all_gather_into_tensor(output_tensor, input_, group=self.device_group)
         # Reshape
         output_tensor = output_tensor.reshape((self.world_size,) + input_size)
         output_tensor = output_tensor.movedim(0, dim)
@@ -238,9 +256,14 @@ class DeviceCommunicatorBase:
         )
 
         # Perform reduce-scatter operation
-        torch.distributed.reduce_scatter_tensor(
-            output_tensor, input_tensor, group=self.device_group
-        )
+        if _SKIP_TP_COMM:
+            # Just take this rank's chunk, skip communication
+            output_tensor.copy_(input_tensor[self.rank_in_group * chunk_size:
+                                             (self.rank_in_group + 1) * chunk_size])
+        else:
+            torch.distributed.reduce_scatter_tensor(
+                output_tensor, input_tensor, group=self.device_group
+            )
 
         # Reshape before returning
         return output_tensor.movedim(0, dim).contiguous()
