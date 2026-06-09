@@ -268,6 +268,7 @@ if TYPE_CHECKING:
     VLLM_DEBUG_MFU_METRICS: bool = False
     VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY: bool = False
     VLLM_WEIGHT_OFFLOADING_DISABLE_UVA: bool = False
+    VLLM_MRV2_DISABLE_UVA: bool = False
     VLLM_DISABLE_LOG_LOGO: bool = False
     VLLM_LORA_DISABLE_PDL: bool = False
     VLLM_ENABLE_CUDA_COMPATIBILITY: bool = False
@@ -1954,6 +1955,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_WEIGHT_OFFLOADING_DISABLE_UVA": lambda: bool(
         int(os.getenv("VLLM_WEIGHT_OFFLOADING_DISABLE_UVA", "0"))
     ),
+    # Disable using UVA (Unified Virtual Addressing) for Model Runner V2
+    # fall back to staging data on the CPU and copying it to the GPU.
+    "VLLM_MRV2_DISABLE_UVA": lambda: bool(int(os.getenv("VLLM_MRV2_DISABLE_UVA", "0"))),
     # Disable logging of vLLM logo at server startup time.
     "VLLM_DISABLE_LOG_LOGO": lambda: bool(int(os.getenv("VLLM_DISABLE_LOG_LOGO", "0"))),
     # Disable PDL for LoRA, as enabling PDL with LoRA on SM100 causes

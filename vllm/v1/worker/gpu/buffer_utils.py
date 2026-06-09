@@ -6,8 +6,10 @@ from functools import partial
 import numpy as np
 import torch
 
+import vllm.envs as envs
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.utils.platform_utils import is_uva_available
+from vllm.utils.platform_utils import is_pin_memory_available, is_uva_available
 from vllm.utils.torch_utils import (
     async_tensor_h2d,
     get_accelerator_view_from_cpu_tensor,
@@ -21,6 +23,17 @@ _DEFAULT_MAX_CONCURRENCY = 2
 def set_default_max_concurrency(n: int) -> None:
     global _DEFAULT_MAX_CONCURRENCY
     _DEFAULT_MAX_CONCURRENCY = max(2, n)
+
+
+def use_uva() -> bool:
+    """Whether to use UVA for Model Runner V2 staging buffers.
+
+    Returns False (i.e. fall back to staging on the CPU and copying to the GPU)
+    when UVA is unavailable or explicitly disabled via ``VLLM_MRV2_DISABLE_UVA``.
+    """
+    if envs.VLLM_MRV2_DISABLE_UVA:
+        return False
+    return is_uva_available()
 
 
 def async_copy_to_gpu(
@@ -43,12 +56,25 @@ def async_copy_to_gpu(
 
 
 class UvaBuffer:
-    def __init__(self, size: int | Sequence[int], dtype: torch.dtype):
-        if not is_uva_available():
-            raise RuntimeError("UVA is not available")
-        self.cpu = torch.zeros(size, dtype=dtype, device="cpu", pin_memory=True)
-        self.np = self.cpu.numpy()
-        self.uva = get_accelerator_view_from_cpu_tensor(self.cpu)
+    def __init__(
+        self,
+        size: int | Sequence[int],
+        dtype: torch.dtype,
+    ):
+        self.use_uva = use_uva()
+        if self.use_uva:
+            self.cpu = torch.zeros(size, dtype=dtype, device="cpu", pin_memory=True)
+            self.np = self.cpu.numpy()
+            self.uva = get_accelerator_view_from_cpu_tensor(self.cpu)
+        else:
+            # Fallback: stage on the CPU and copy to a separate device tensor.
+            self.cpu = torch.zeros(
+                size, dtype=dtype, device="cpu", pin_memory=is_pin_memory_available()
+            )
+            self.np = self.cpu.numpy()
+            self.uva = torch.zeros(
+                size, dtype=dtype, device=current_platform.device_type
+            )
 
 
 class UvaBufferPool:
@@ -77,7 +103,9 @@ class UvaBufferPool:
         dst = buf.cpu if isinstance(x, torch.Tensor) else buf.np
         n = len(x)
         dst[:n] = x
-        return buf.uva[:n]
+        if buf.use_uva:
+            return buf.uva[:n]
+        return buf.uva[:n].copy_(buf.cpu[:n], non_blocking=True)
 
     def copy_to_gpu(
         self,
@@ -133,8 +161,8 @@ class StagedWriteTensor:
         self.device = device
         self.max_concurrency = max_concurrency
 
-        if not uva_instead_of_gpu:
-            # Create a GPU tensor (default)
+        if not uva_instead_of_gpu or not use_uva():
+            # Create a GPU tensor (default).
             self.gpu = torch.zeros(size, dtype=dtype, device=device)
         else:
             # For a large but not-frequently-accessed tensor, we can use UVA instead of
