@@ -152,7 +152,7 @@ class BreakableCUDAGraphCapture:
         self.segments: list[Callable[[], Any]] = []
         self._num_graphs: int = 0
         self._num_eager_breaks: int = 0
-        self._current_graph: torch.cuda.CUDAGraph | None = None
+        self._current_graph: Any | None = None
         self._capturing: bool = False
 
     # --- context manager protocol ----------------------------------------
@@ -174,11 +174,8 @@ class BreakableCUDAGraphCapture:
 
     def _begin_segment(self) -> None:
         assert not self._capturing
-        g = torch.cuda.CUDAGraph()
-        if self.pool is not None:
-            g.capture_begin(pool=self.pool)
-        else:
-            g.capture_begin()
+        g = torch.accelerator.Graph(pool=self.pool, capture_error_mode="global")
+        g.capture_begin()
         self._current_graph = g
         self._capturing = True
 

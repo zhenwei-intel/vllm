@@ -299,12 +299,12 @@ class TestCUDAGraphWrapper:
                 cudagraph_runtime_mode=CUDAGraphMode.FULL,
                 batch_descriptor=batch_descriptor,
             ),
-            patch("torch.cuda.graph", wraps=torch.cuda.graph) as mock_cuda_graph,
+            patch("torch.accelerator.Graph", wraps=torch.accelerator.Graph) as mock_graph,
         ):
             output1 = wrapper(self.input_tensor)
             # capturing phase should generate a zero output
             assert torch.allclose(output1, torch.zeros_like(output1))
-            mock_cuda_graph.assert_called_once()
+            mock_graph.assert_called_once()
 
         assert batch_descriptor in wrapper.concrete_cudagraph_entries
         entry = wrapper.concrete_cudagraph_entries[batch_descriptor]
@@ -342,13 +342,13 @@ class TestCUDAGraphWrapper:
                 cudagraph_runtime_mode=CUDAGraphMode.PIECEWISE,
                 batch_descriptor=batch_descriptor,
             ),
-            patch("torch.cuda.graph", wraps=torch.cuda.graph) as mock_cuda_graph,
+            patch("torch.accelerator.Graph", wraps=torch.accelerator.Graph) as mock_graph,
             patch.object(
                 self.model, "forward", wraps=self.model.forward
             ) as mock_forward,
         ):
             wrapper(self.input_tensor)
-            mock_cuda_graph.assert_not_called()
+            mock_graph.assert_not_called()
             mock_forward.assert_called_once()
         assert not wrapper.concrete_cudagraph_entries
 
@@ -365,10 +365,10 @@ class TestCUDAGraphWrapper:
                 cudagraph_runtime_mode=CUDAGraphMode.NONE,
                 batch_descriptor=batch_descriptor,
             ),
-            patch("torch.cuda.graph", wraps=torch.cuda.graph) as mock_cuda_graph,
+            patch("torch.accelerator.Graph", wraps=torch.accelerator.Graph) as mock_graph,
         ):
             wrapper(self.input_tensor)
-            mock_cuda_graph.assert_not_called()
+            mock_graph.assert_not_called()
         assert not wrapper.concrete_cudagraph_entries
 
 
@@ -378,7 +378,7 @@ def _run_and_monitor_call(
     """Helper to run a single call and monitor the action."""
 
     with (
-        patch("torch.cuda.graph", wraps=torch.cuda.graph) as mock_graph_context,
+        patch("torch.accelerator.Graph", wraps=torch.accelerator.Graph) as mock_graph,
         patch.object(wrapper, "runnable", wraps=wrapper.runnable) as mock_runnable,
     ):
         entry = wrapper.concrete_cudagraph_entries.get(batch_descriptor, None)
@@ -402,7 +402,7 @@ def _run_and_monitor_call(
             with context:
                 wrapper(input_tensor)
 
-        if mock_graph_context.called:
+        if mock_graph.called:
             # note that this is globally mocked, so it will be detected
             # even whether called by the inner or outer wrapper
             return "capture_global"
