@@ -727,6 +727,52 @@ class TestTritonTopkTopp:
             if finite_in > 0:
                 assert kept > 0, f"Row {i}: no tokens kept"
 
+    @pytest.mark.parametrize("k_val", [5, 10, 20])
+    def test_topk_tied_logits_exact_count(self, k_val: int):
+        """Top-k with many tied logits forces ternary-search timeout fallback.
+
+        When many tokens share the same logit value at the top-k boundary,
+        the ternary search interval collapses quickly and the fallback branch
+        is triggered. This is a regression test for the bug where k_pivot,
+        k_pivots_num, min_larger, and num_min_larger were inconsistent in
+        the fallback branch, causing the surviving-token count to differ
+        from k.
+
+        The test asserts that exactly k tokens survive for each row where
+        there are at least k finite tokens, matching the PyTorch reference.
+        """
+        from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
+
+        batch_size, vocab_size = 16, 32000
+        # Construct logits so that the top-(k+50) tokens all share the same
+        # value, forcing the ternary search to collapse and use the fallback.
+        logits = torch.full(
+            (batch_size, vocab_size), float("-inf"), dtype=torch.float32
+        )
+        tied_count = k_val + 50  # more tied tokens than k
+        for i in range(batch_size):
+            indices = torch.randperm(vocab_size, generator=self.generator)[
+                :tied_count
+            ]
+            logits[i, indices] = 1.0  # all equal — forces range collapse
+
+        k = torch.full((batch_size,), k_val, dtype=torch.int32)
+
+        # PyTorch reference
+        logits_pytorch = logits.clone().float()
+        result_pytorch = apply_top_k_top_p_pytorch(logits_pytorch, k, p=None)
+        pytorch_kept = (result_pytorch > float("-inf")).sum(dim=-1)
+
+        # Triton kernel
+        result_triton = apply_top_k_top_p_triton(logits.clone(), k, p=None)
+        triton_kept = (result_triton > float("-inf")).sum(dim=-1)
+
+        assert torch.equal(pytorch_kept, triton_kept), (
+            f"Top-k tied-logit count mismatch (k={k_val}): "
+            f"PyTorch kept {pytorch_kept.tolist()}, "
+            f"Triton kept {triton_kept.tolist()}"
+        )
+
 
 # =============================================================================
 # FlashInfer top-k/top-p robustness tests

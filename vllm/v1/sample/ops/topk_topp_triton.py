@@ -278,9 +278,21 @@ def _topk_topp_kernel(
 
                         num_iters += 1
                         if num_iters >= 18 or tl.abs(min_range - max_range) < 1e-9:
-                            k_pivot = (max_range + min_range) / 2.0
-                            min_larger = min_larger_0
-                            num_min_larger = num_min_larger_0
+                            # Snap to an already-evaluated pivot so that
+                            # k_pivot, k_pivots_num, min_larger and
+                            # num_min_larger all describe the SAME threshold.
+                            # Prefer the larger pivot that still keeps >= k
+                            # tokens; otherwise fall back to the smaller one.
+                            if k_pivots_num_1 >= k:
+                                k_pivot = k_pivot_1
+                                k_pivots_num = k_pivots_num_1
+                                min_larger = min_larger_1
+                                num_min_larger = num_min_larger_1
+                            else:
+                                k_pivot = k_pivot_0
+                                k_pivots_num = k_pivots_num_0
+                                min_larger = min_larger_0
+                                num_min_larger = num_min_larger_0
                             found_pivot = 1
                 else:
                     # If top-k outlier gathering failed, search whole logit space
@@ -360,14 +372,27 @@ def _topk_topp_kernel(
 
                         num_iters += 1
                         if num_iters >= 18 or tl.abs(min_range - max_range) < 1e-9:
-                            k_pivot = (max_range + min_range) / 2.0
-                            min_larger = min_larger_0
-                            num_min_larger = num_min_larger_0
+                            # Snap to an already-evaluated pivot so that
+                            # k_pivot, k_pivots_num, min_larger and
+                            # num_min_larger all describe the SAME threshold.
+                            # Prefer the larger pivot that still keeps >= k
+                            # tokens; otherwise fall back to the smaller one.
+                            if k_pivots_num_1 >= k:
+                                k_pivot = k_pivot_1
+                                k_pivots_num = k_pivots_num_1
+                                min_larger = min_larger_1
+                                num_min_larger = num_min_larger_1
+                            else:
+                                k_pivot = k_pivot_0
+                                k_pivots_num = k_pivots_num_0
+                                min_larger = min_larger_0
+                                num_min_larger = num_min_larger_0
                             found_pivot = 1
 
                 duplicate_logit = min_larger
                 num_duplicate_logit = num_min_larger
-                num_keep = num_duplicate_logit - (k_pivots_num - k)
+                excess = tl.where(k_pivots_num > k, k_pivots_num - k, 0)
+                num_keep = num_duplicate_logit - excess
                 num_kept = tl.zeros((), dtype=tl.uint32)
 
                 # Top-k only path.  If there are fewer finite values
