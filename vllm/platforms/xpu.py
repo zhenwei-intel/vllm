@@ -163,6 +163,14 @@ class XPUPlatform(Platform):
             return "vllm.lora.punica_wrapper.punica_gpu.PunicaWrapperGPU"
 
     @classmethod
+    def mem_get_info(cls, device=None) -> tuple[int, int]:
+        if device is None:
+            device = torch.xpu.current_device()
+        elif isinstance(device, torch.device):
+            device = device.index
+        return torch.ops._C_cache_ops.getMemoryInfo(device)
+
+    @classmethod
     def get_device_total_memory(cls, device_id: int = 0) -> int:
         device_props = torch.xpu.get_device_properties(device_id)
         return device_props.total_memory

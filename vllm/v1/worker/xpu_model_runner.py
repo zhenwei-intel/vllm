@@ -5,6 +5,7 @@ from contextlib import contextmanager
 import torch
 
 from vllm.config import VllmConfig
+from vllm.platforms import current_platform
 from vllm.utils.torch_utils import supports_xpu_graph
 from vllm.v1.worker.gpu.model_runner import (
     GPUModelRunner as GPUModelRunnerV2,
@@ -45,7 +46,7 @@ def _torch_cuda_wrapper():
     torch.cuda.default_stream = torch.xpu.current_stream
     torch.cuda.current_stream = torch.xpu.current_stream
     torch.cuda.stream = torch.xpu.stream
-    torch.cuda.mem_get_info = torch.xpu.mem_get_info
+    torch.cuda.mem_get_info = current_platform.mem_get_info
     torch.cuda.Event = torch.Event
     torch.cuda.set_stream = torch.xpu.set_stream
     if supports_xpu_graph():
