@@ -6,6 +6,41 @@
 | -------- |
 | [Intel® Arc™ Pro B-Series Graphics](https://www.intel.com/content/www/us/en/products/docs/discrete-gpus/arc/workstations/b-series/overview.html) |
 
+## Current Gaps on Intel XPU
+
+The following items are currently limited or unsupported on Intel XPU:
+
+### Feature Gaps
+
+- **CUDA graph mode** is not supported on Intel XPU yet ([tracking issue](https://github.com/vllm-project/vllm/issues/26970)).
+- **Flash Attention with `float32`** falls back to Triton Attention on XPU.
+- **`bfloat16` on Intel Arc A770** is blocked due to known accuracy issues (use `float16` instead).
+- **XPU graph capture** has additional limits in multi-GPU communication scenarios.
+
+### Quantization Gaps on Intel GPU
+
+From the quantization hardware matrix in
+[`docs/features/quantization/README.md`](../../features/quantization/README.md),
+the following are not supported on Intel GPU:
+
+- Marlin (GPTQ/AWQ/FP8/FP4)
+- INT8 (W8A8)
+- FP8 (W8A8)
+- bitsandbytes
+- DeepSpeedFP
+- GGUF
+
+## Model Support Scope
+
+vLLM currently publishes a **validated model list** for Intel XPU (below), but
+does not maintain an exhaustive "unsupported model" deny list.
+
+For Intel XPU, treat a model as **not supported / not yet validated** when any of the following is true:
+
+- The model architecture or checkpoint is **not listed** in the validated tables below.
+- The model depends on a quantization method listed above as unsupported on Intel GPU.
+- The model only works with unsupported XPU feature combinations.
+
 ## Recommended Models
 
 ### Text-only Language Models
