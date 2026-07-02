@@ -10,8 +10,13 @@ from vllm.platforms import current_platform
 
 
 def is_quant_method_supported(quant_method: str) -> bool:
-    # Currently, all quantization methods require Nvidia or AMD GPUs
-    if not (current_platform.is_cuda() or current_platform.is_rocm()):
+    # Most quantization methods require Nvidia or AMD GPUs.
+    # XPU currently supports GGUF quantization.
+    if not (
+        current_platform.is_cuda()
+        or current_platform.is_rocm()
+        or (current_platform.is_xpu() and quant_method == "gguf")
+    ):
         return False
 
     try:
@@ -20,7 +25,8 @@ def is_quant_method_supported(quant_method: str) -> bool:
         return False
 
     capability = current_platform.get_device_capability()
-    assert capability is not None
+    if capability is None:
+        return current_platform.is_xpu() and quant_method == "gguf"
 
     min_capability = get_quantization_config(quant_method).get_min_capability()
 
