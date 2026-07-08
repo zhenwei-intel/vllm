@@ -50,8 +50,10 @@ def _torch_cuda_wrapper():
     torch.cuda.stream = partial(torch.xpu.stream)
     torch.cuda.set_stream = partial(torch.xpu.set_stream)
     torch.cuda.Event = partial(torch.xpu.Event)
+    # Graph capture/replay now goes through the device-agnostic
+    # torch.accelerator.Graph API, so torch.cuda.graph / torch.cuda.CUDAGraph
+    # no longer need XPU aliases. Only the graph memory pool handle is still
+    # obtained via the torch.cuda namespace in some paths.
     if supports_xpu_graph():
-        torch.cuda.graph = partial(torch.xpu.graph)
-        torch.cuda.CUDAGraph = torch.xpu.XPUGraph
         torch.cuda.graph_pool_handle = partial(torch.xpu.graph_pool_handle)
     yield

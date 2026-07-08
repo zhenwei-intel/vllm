@@ -40,7 +40,7 @@ class BudgetGraphMetadata:
     token_budget: int
     max_batch_size: int  # Max number of images/videos per batch
     max_frames_per_batch: int  # Max total frames per batch (for video)
-    graph: torch.cuda.CUDAGraph
+    graph: torch.accelerator.Graph
     # Buffers recorded into the CUDA graph (e.g. embeddings, sequence metadata).
     # Before replay the manager updates these in-place. By default buffers are
     # zeroed before slice-copying the actual values; model-specific padding
@@ -276,8 +276,8 @@ class EncoderCudaGraphManager:
             output = self.model.encoder_cudagraph_forward({**values}, path=path)
             output_buffer = torch.empty_like(output)
 
-        graph = torch.cuda.CUDAGraph()
-        with torch.inference_mode(), torch.cuda.graph(graph, pool=self.graph_pool):
+        graph = torch.accelerator.Graph(pool=self.graph_pool)
+        with torch.inference_mode(), graph:
             output = self.model.encoder_cudagraph_forward({**values}, path=path)
             output_buffer.copy_(output)
 

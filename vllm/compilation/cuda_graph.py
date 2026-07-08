@@ -24,7 +24,7 @@ from vllm.forward_context import (
 from vllm.logger import init_logger
 from vllm.model_executor.offloader.base import get_offloader
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import current_stream, weak_ref_tensors
+from vllm.utils.torch_utils import weak_ref_tensors
 
 logger = init_logger(__name__)
 
@@ -127,7 +127,7 @@ class CUDAGraphLogging:
 @dataclasses.dataclass
 class CUDAGraphEntry:
     batch_descriptor: BatchDescriptor
-    cudagraph: torch.cuda.CUDAGraph | None = None
+    cudagraph: torch.accelerator.Graph | None = None
     output: Any | None = None
 
     # for cudagraph debugging, track the input addresses
@@ -280,7 +280,7 @@ class CUDAGraphWrapper:
                 x.data_ptr() for x in args if isinstance(x, torch.Tensor)
             ]
             entry.input_addresses = input_addresses
-            cudagraph = torch.cuda.CUDAGraph()
+            cudagraph = torch.accelerator.Graph(pool=self.graph_pool)
 
             with ExitStack() as stack:
                 if self.cudagraph_options.gc_disable:
@@ -310,11 +310,7 @@ class CUDAGraphWrapper:
                 get_offloader().sync_prev_onload()
 
                 # mind-exploding: carefully manage the reference and memory.
-                with torch.cuda.graph(
-                    cudagraph,
-                    pool=self.graph_pool,
-                    stream=current_stream(),
-                ):
+                with cudagraph:
                     # `output` is managed by pytorch's cudagraph pool
                     output = self.runnable(*args, **kwargs)
                     # Join offloader's copy stream after forward to avoid

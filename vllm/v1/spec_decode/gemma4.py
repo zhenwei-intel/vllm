@@ -54,7 +54,7 @@ class Gemma4Proposer(SpecDecodeBaseProposer):
         # masking is active. _centroids_sizes is pre-sorted for fast
         # lookup in _greedy_sample.
         self._centroids_sizes: list[int] = []
-        self._centroids_graphs: dict[int, torch.cuda.CUDAGraph] = {}
+        self._centroids_graphs: dict[int, torch.accelerator.Graph] = {}
         self._centroids_inputs: dict[int, torch.Tensor] = {}
         self._centroids_outputs: dict[int, torch.Tensor] = {}
 
@@ -117,6 +117,10 @@ class Gemma4Proposer(SpecDecodeBaseProposer):
         masked_emb = self.model.masked_embedding
         lm_head_weight = self.model._get_full_lm_head_weight()
 
+        # Capture on a dedicated side stream: torch.accelerator.Graph records
+        # the current stream and capture is not allowed on the default stream.
+        capture_stream = torch.cuda.Stream()
+
         for size in [1, 2, 4, 8, 16, 32, 64]:
             static_input = torch.zeros(
                 size,
@@ -128,8 +132,8 @@ class Gemma4Proposer(SpecDecodeBaseProposer):
                 masked_emb.get_top_tokens(static_input, lm_head_weight)
             torch.accelerator.synchronize()
 
-            g = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(g):
+            g = torch.accelerator.Graph()
+            with torch.cuda.stream(capture_stream), g:
                 static_output = masked_emb.get_top_tokens(
                     static_input,
                     lm_head_weight,

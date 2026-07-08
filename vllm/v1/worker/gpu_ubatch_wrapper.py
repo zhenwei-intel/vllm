@@ -60,7 +60,7 @@ class UbatchMetadata:
 
 @dataclass
 class CUDAGraphMetaData:
-    cudagraph: torch.cuda.CUDAGraph
+    cudagraph: torch.accelerator.Graph
     ubatch_metadata: UbatchMetadata
     outputs: Any | None = None
 
@@ -272,7 +272,7 @@ class UBatchWrapper:
 
             # Capture the cudagraph
             cudagraph_metadata = CUDAGraphMetaData(
-                cudagraph=torch.cuda.CUDAGraph(),
+                cudagraph=torch.accelerator.Graph(pool=self.graph_pool),
                 ubatch_metadata=ubatch_metadata,
             )
             if self.graph_pool is not None:
@@ -284,10 +284,9 @@ class UBatchWrapper:
             # Ensure any pre-capture prefetches from offloader are complete.
             get_offloader().sync_prev_onload()
 
-            with torch.cuda.graph(
+            with (
+                torch.cuda.stream(compute_stream),
                 cudagraph_metadata.cudagraph,
-                stream=compute_stream,
-                pool=self.graph_pool,
             ):
                 ubatch_metadata[0].context.cpu_wait_event.set()
                 for thread in ubatch_threads:
