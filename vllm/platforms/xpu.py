@@ -373,14 +373,18 @@ class XPUPlatform(Platform):
         if "VLLM_WORKER_MULTIPROC_METHOD" not in os.environ:
             os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
-        # XPU requires graceful shutdown to allow oneCCL/Level Zero resources
-        # to be properly released. Without this, subsequent server startups on
-        # the same devices may hang during CCL initialization.
-        if vllm_config.shutdown_timeout == 0:
-            vllm_config.shutdown_timeout = 5
+        # When using the XPU profiler (unitrace-based), ensure a non-zero
+        # shutdown timeout so the EngineCore subprocess can exit cleanly and
+        # unitrace has time to flush device traces before the process is killed.
+        if (
+            vllm_config.profiler_config is not None
+            and vllm_config.profiler_config.profiler == "xpu"
+            and vllm_config.shutdown_timeout == 0
+        ):
+            vllm_config.shutdown_timeout = 30
             logger.info(
-                "XPU platform: set server shutdown_timeout=%d.",
-                vllm_config.shutdown_timeout,
+                "Setting shutdown_timeout to 30s for XPU profiler "
+                "(unitrace requires a clean process exit to flush traces)."
             )
 
     @classmethod
