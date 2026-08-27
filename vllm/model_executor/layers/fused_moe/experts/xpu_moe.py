@@ -37,10 +37,13 @@ def prepare_fp8_moe_layer_for_xpu(
     w2: torch.Tensor,
     w2_scale: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    if w13_scale is not None and w13_scale.ndim == 3:
-        w13_scale = w13_scale.transpose(-1, -2).contiguous()
-    if w2_scale is not None and w2_scale.ndim == 3:
-        w2_scale = w2_scale.transpose(-1, -2).contiguous()
+    # Only XE2 (BMG/PVC/LNL) wants block scales transposed; the XE3 grouped
+    # GEMM takes them in the loaded [E, ceil(N/128), ceil(K/128)] layout.
+    if torch.ops._xpu_C.is_xe2_arch():
+        if w13_scale is not None and w13_scale.ndim == 3:
+            w13_scale = w13_scale.transpose(-1, -2).contiguous()
+        if w2_scale is not None and w2_scale.ndim == 3:
+            w2_scale = w2_scale.transpose(-1, -2).contiguous()
     return (
         w13.transpose(-1, -2).contiguous(),
         w13_scale,
