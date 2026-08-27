@@ -1,0 +1,290 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""
+XPU Grouped GEMM expert implementation for pre-permuted inputs.
+
+Used with XPUDeepSymmPrepareFinalize which provides pre-permuted
+hidden_states and rows_per_expert via ExpertTokensMetadata. Calls
+cutlass_grouped_gemm_interface directly without internal remap/gather.
+"""
+
+import torch
+
+import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm import _custom_ops as ops
+from vllm.model_executor.layers.fused_moe.activation import (
+    MoEActivation,
+    apply_moe_activation,
+)
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEConfig,
+    FusedMoEParallelConfig,
+    FusedMoEQuantConfig,
+)
+from vllm.model_executor.layers.fused_moe.prepare_finalize.no_dp_ep import (
+    _quantize_input,
+)
+from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
+    TopKWeightAndReduceNoOP,
+)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    kFp8DynamicTensorSym,
+    kFp8StaticTensorSym,
+    kInt4Static,
+)
+from vllm.platforms import current_platform
+
+
+def _dequantize_to_bf16(x: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
+    """Dequantize quantized activations back to BF16.
+
+    Handles per-tensor (scalar/1D scale), block (2D scale with
+    block_size columns), and MX (e8m0fnu scale) formats.
+    """
+    out_dtype = torch.bfloat16
+    if scale.numel() == 1:
+        return x.to(out_dtype) * scale.to(out_dtype)
+    elif scale.dtype == torch.float8_e8m0fnu:
+        scale_f = (scale.view(torch.uint8).to(torch.int32) - 127).exp2().to(out_dtype)
+        block_size = x.shape[-1] // scale.shape[-1]
+        scale_expanded = scale_f.repeat_interleave(block_size, dim=-1)
+        return x.to(out_dtype) * scale_expanded[..., : x.shape[-1]]
+    elif scale.ndim == 2 and scale.shape[0] == x.shape[0]:
+        block_size = x.shape[-1] // scale.shape[-1]
+        scale_expanded = scale.to(out_dtype).repeat_interleave(block_size, dim=-1)
+        return x.to(out_dtype) * scale_expanded[..., : x.shape[-1]]
+    else:
+        return x.to(out_dtype) * scale.to(out_dtype)
+
+
+class XPUGroupedGemmExperts(mk.FusedMoEExpertsModular):
+    """
+    Expert kernel for pre-permuted inputs using cutlass_grouped_gemm.
+
+    Expects hidden_states already in expert-grouped layout with
+    rows_per_expert provided via expert_tokens_meta. Does NOT perform
+    internal permutation or gather — those are handled by the
+    PrepareFinalize (e.g. XPUDeepSymmPrepareFinalize).
+    """
+
+    def __init__(
+        self,
+        moe_config: FusedMoEConfig,
+        quant_config: FusedMoEQuantConfig,
+        max_num_tokens: int | None = None,
+        num_dispatchers: int | None = None,
+    ):
+        super().__init__(
+            moe_config,
+            quant_config,
+            max_num_tokens,
+            num_dispatchers,
+        )
+        self.is_fp8 = False
+        self.is_int4 = False
+        self.is_mxfp4 = False
+
+    @property
+    def expects_unquantized_inputs(self) -> bool:
+        return False
+
+    def moe_problem_size(
+        self,
+        a1: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_ids: torch.Tensor,
+    ) -> tuple[int, int, int, int, int]:
+        # Input is pre-permuted: (total_rows * topk, hidden_size).
+        # Treat it as M = total_rows * topk with topk=1 for workspace
+        # allocation since permutation is already done.
+        # XPU weight layout: [E, K, N] (not [E, N, K]).
+        assert len(w1.shape) == 3 and len(w2.shape) == 3
+        E = w1.shape[0]
+        N = w1.shape[-1]  # 2*inter_size (output dim is last for XPU)
+        K = a1.size(-1)
+        M = a1.size(0)
+        topk = 1
+        return E, M, N, K, topk
+
+    @staticmethod
+    def activation_format() -> mk.FusedMoEActivationFormat:
+        return mk.FusedMoEActivationFormat.Standard
+
+    @staticmethod
+    def _supports_current_device() -> bool:
+        return current_platform.is_xpu()
+
+    @staticmethod
+    def _supports_no_act_and_mul() -> bool:
+        return True
+
+    @staticmethod
+    def _supports_activation(activation: MoEActivation) -> bool:
+        return activation in [
+            MoEActivation.SILU,
+            MoEActivation.GELU,
+            MoEActivation.GELU_TANH,
+            MoEActivation.SWIGLUOAI,
+            MoEActivation.RELU2_NO_MUL,
+        ]
+
+    @staticmethod
+    def _supports_parallel_config(
+        moe_parallel_config: FusedMoEParallelConfig,
+    ) -> bool:
+        return True
+
+    @staticmethod
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        SUPPORTED_W_A = [
+            (None, None),
+            (kFp8StaticTensorSym, None),
+            (kFp8StaticTensorSym, kFp8StaticTensorSym),
+            (kFp8StaticTensorSym, kFp8DynamicTensorSym),
+            (kInt4Static, None),
+        ]
+        return (weight_key, activation_key) in SUPPORTED_W_A
+
+    def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
+        return TopKWeightAndReduceNoOP()
+
+    def workspace_shapes(
+        self,
+        M: int,
+        N: int,
+        K: int,
+        topk: int,
+        global_num_experts: int,
+        local_num_experts: int,
+        expert_tokens_meta: mk.ExpertTokensMetadata | None,
+        activation: MoEActivation,
+    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
+        # M is already total_rows * topk (pre-permuted), topk=1 from
+        # moe_problem_size override.
+        inter_size = N // 2
+        is_relu2_no_mul = activation == MoEActivation.RELU2_NO_MUL
+        inter_size_scale = 2 if is_relu2_no_mul else 1
+
+        workspace13 = (M, 2 * inter_size)
+        workspace2 = (M, inter_size * inter_size_scale)
+        output = (M, K)
+        return (workspace13, workspace2, output)
+
+    def apply(
+        self,
+        output: torch.Tensor,
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        activation: MoEActivation,
+        global_num_experts: int,
+        expert_map: torch.Tensor | None,
+        a1q_scale: torch.Tensor | None,
+        a2_scale: torch.Tensor | None,
+        workspace13: torch.Tensor,
+        workspace2: torch.Tensor,
+        expert_tokens_meta: mk.ExpertTokensMetadata | None,
+        apply_router_weight_on_input: bool,
+    ) -> None:
+        assert expert_tokens_meta is not None, (
+            "XPUGroupedGemmExperts requires expert_tokens_meta with "
+            "rows_per_expert from PrepareFinalize"
+        )
+        rows_per_expert = expert_tokens_meta.expert_num_tokens
+
+        num_experts = self.moe_config.num_local_experts
+        num_moe_inputs = hidden_states.size(0)
+
+        curr_dev = torch.xpu.current_device()
+        support_native_lp = torch.ops._xpu_C.is_nvl_p(
+            curr_dev
+        ) or torch.ops._xpu_C.is_cri(curr_dev)
+
+        # Dequantize if hardware doesn't support native low-precision GEMM
+        if a1q_scale is not None and not support_native_lp:
+            hidden_states = _dequantize_to_bf16(hidden_states, a1q_scale)
+            a1q_scale = None
+
+        hidden_size = hidden_states.size(-1)
+        # MXFP4 packs 2 values per byte — logical hidden dim is 2x stored
+        gemm_hidden_size = 2 * hidden_size if self.is_mxfp4 else hidden_size
+
+        # XPU weight layout must be [E, K, N] (transposed by
+        # prepare_fp8_moe_layer_for_xpu during weight loading).
+        inter_size = w1.shape[-1] // 2
+        is_relu2_no_mul = activation == MoEActivation.RELU2_NO_MUL
+        inter_size_scale = 2 if is_relu2_no_mul else 1
+
+        # Prepare activation scales for GEMM1
+        gemm1_a_scale = None
+        if a1q_scale is not None:
+            total_padded = a1q_scale.shape[0] + 3 * num_experts
+            if a1q_scale.dtype == torch.float8_e8m0fnu:
+                gemm1_a_scale = torch.ops._moe_C.reorder_mxfp_scales(
+                    a1q_scale, rows_per_expert, total_padded
+                )
+            else:
+                gemm1_a_scale = a1q_scale
+
+        # gemm1: hidden_states @ w13 -> workspace13
+        gemm1_output = workspace13[:num_moe_inputs, : 2 * inter_size]
+        torch.ops._xpu_C.cutlass_grouped_gemm_interface(
+            ptr_A=hidden_states,
+            ptr_A_scale=gemm1_a_scale,
+            ptr_B=w1,
+            ptr_B_scale=self.w1_scale,
+            ptr_bias=self.w1_bias,
+            ptr_D=gemm1_output,
+            rows_per_expert=rows_per_expert,
+            N=2 * inter_size,
+            K=gemm_hidden_size,
+            num_experts=num_experts,
+        )
+
+        # activation
+        act_output = workspace2[:num_moe_inputs, : inter_size * inter_size_scale]
+        apply_moe_activation(activation, act_output, gemm1_output)
+
+        # Prepare activation scales for GEMM2
+        gemm2_a_scale = None
+        if a1q_scale is not None and support_native_lp:
+            if a2_scale is not None:
+                # Static FP8: quantize with pre-computed scale
+                act_output, gemm2_a_scale = ops.scaled_fp8_quant(
+                    act_output,
+                    a2_scale,
+                )
+            else:
+                # Dynamic quant (FP8, MXFP, block, etc.)
+                act_output, gemm2_a_scale = _quantize_input(
+                    act_output, self.quant_config
+                )
+            if (
+                gemm2_a_scale is not None
+                and gemm2_a_scale.dtype == torch.float8_e8m0fnu
+            ):
+                total_padded = gemm2_a_scale.shape[0] + 3 * num_experts
+                gemm2_a_scale = torch.ops._moe_C.reorder_mxfp_scales(
+                    gemm2_a_scale, rows_per_expert, total_padded
+                )
+
+        # gemm2: act_output @ w2 -> output
+        torch.ops._xpu_C.cutlass_grouped_gemm_interface(
+            ptr_A=act_output,
+            ptr_A_scale=gemm2_a_scale,
+            ptr_B=w2,
+            ptr_B_scale=self.w2_scale,
+            ptr_bias=self.w2_bias,
+            ptr_D=output,
+            rows_per_expert=rows_per_expert,
+            N=gemm_hidden_size,
+            K=inter_size * inter_size_scale,
+            num_experts=num_experts,
+        )
