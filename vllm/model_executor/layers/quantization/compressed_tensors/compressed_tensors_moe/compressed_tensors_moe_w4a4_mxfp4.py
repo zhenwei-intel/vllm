@@ -23,6 +23,7 @@ from vllm.model_executor.layers.fused_moe.experts.marlin_moe import (
 )
 from vllm.model_executor.layers.fused_moe.experts.xpu_moe import (
     XPUExpertsMxFp4,
+    prepare_mxfp4_moe_scales_for_xpu,
 )
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     Mxfp4MoeBackend,
@@ -189,7 +190,11 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
                 torch.stack(swizzled_w2), requires_grad=False
             )
         elif current_platform.is_xpu():
-            pass
+            w13_scale, w2_scale = prepare_mxfp4_moe_scales_for_xpu(
+                layer.w13_weight_scale.data, layer.w2_weight_scale.data
+            )
+            layer.w13_weight_scale = torch.nn.Parameter(w13_scale, requires_grad=False)
+            layer.w2_weight_scale = torch.nn.Parameter(w2_scale, requires_grad=False)
         else:
             logger.warning_once(
                 "Your GPU does not have native support for FP4 computation "
