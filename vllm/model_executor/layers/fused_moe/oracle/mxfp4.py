@@ -1186,13 +1186,7 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
             w2_bias,
         )
     elif mxfp4_backend == Mxfp4MoeBackend.XPU:
-        from vllm.model_executor.layers.fused_moe.experts.xpu_moe import (
-            prepare_mxfp4_moe_scales_for_xpu,
-        )
-
-        w13_weight_scale, w2_weight_scale = prepare_mxfp4_moe_scales_for_xpu(
-            w13_weight_scale, w2_weight_scale
-        )
+        # No additional transformation needed for XPU backend
         return (
             w13_weight,
             w2_weight,
@@ -1670,16 +1664,8 @@ def convert_weight_to_mxfp4_moe_kernel_format(
         Mxfp4MoeBackend.XPU,
         Mxfp4MoeBackend.EMULATION,
     ):
-        # Emulation dequantizes the checkpoint layout at runtime and needs no
-        # transformation; XPU only needs its scales repacked MN-major.
-        if mxfp4_backend == Mxfp4MoeBackend.XPU:
-            from vllm.model_executor.layers.fused_moe.experts.xpu_moe import (
-                prepare_mxfp4_moe_scales_for_xpu,
-            )
-
-            w13_weight_scale, w2_weight_scale = prepare_mxfp4_moe_scales_for_xpu(
-                w13_weight_scale, w2_weight_scale
-            )
+        # No additional transformation is needed: XPU consumes the checkpoint
+        # layout directly, while emulation dequantizes that layout at runtime.
         return (
             w13_weight,
             w2_weight,

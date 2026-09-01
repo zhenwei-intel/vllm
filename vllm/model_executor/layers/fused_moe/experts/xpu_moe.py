@@ -31,53 +31,6 @@ if current_platform.is_xpu():
     from vllm_xpu_kernels.fused_moe_interface import XpuFusedMoe
 
 
-def prepare_fp8_moe_layer_for_xpu(
-    w13: torch.Tensor,
-    w13_scale: torch.Tensor,
-    w2: torch.Tensor,
-    w2_scale: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    # Only XE2 (BMG/PVC/LNL) wants block scales transposed; the XE3 grouped
-    # GEMM takes them in the loaded [E, ceil(N/128), ceil(K/128)] layout.
-    if torch.ops._xpu_C.is_xe2_arch():
-        if w13_scale is not None and w13_scale.ndim == 3:
-            w13_scale = w13_scale.transpose(-1, -2).contiguous()
-        if w2_scale is not None and w2_scale.ndim == 3:
-            w2_scale = w2_scale.transpose(-1, -2).contiguous()
-    return (
-        w13.transpose(-1, -2).contiguous(),
-        w13_scale,
-        w2.transpose(-1, -2).contiguous(),
-        w2_scale,
-    )
-
-
-def is_xe3p_device(device_index: int = 0) -> bool:
-    return torch.ops._xpu_C.is_cri(device_index) or torch.ops._xpu_C.is_nvl_p(
-        device_index
-    )
-
-
-def prepare_mxfp4_moe_scales_for_xpu(
-    w13_scale: torch.Tensor | None,
-    w2_scale: torch.Tensor | None,
-) -> tuple[torch.Tensor | None, torch.Tensor | None]:
-    # The MN-major scale layout is an XE3 grouped GEMM requirement; the weights
-    # themselves stay in [E, N, K // 2]. Older parts (BMG/PVC) do not use that
-    # kernel, so they keep the checkpoint layout.
-    if not is_xe3p_device():
-        return w13_scale, w2_scale
-
-    def _to_mn_major_e8m0(scale: torch.Tensor | None) -> torch.Tensor | None:
-        if scale is None or scale.ndim != 3:
-            return scale
-        if scale.dtype == torch.uint8:
-            scale = scale.view(torch.float8_e8m0fnu)
-        return scale.transpose(-1, -2).contiguous().transpose(-1, -2)
-
-    return _to_mn_major_e8m0(w13_scale), _to_mn_major_e8m0(w2_scale)
-
-
 class XPUExperts(mk.FusedMoEExpertsModular):
     def __init__(
         self,
@@ -94,7 +47,7 @@ class XPUExperts(mk.FusedMoEExpertsModular):
         )
         self.gemm1_clamp_limit = quant_config.gemm1_clamp_limit
         self.fused_moe_impl: XpuFusedMoe | None = None
-        is_xe3p = is_xe3p_device()
+        is_xe3p = torch.ops._xpu_C.is_cri(0) or torch.ops._xpu_C.is_nvl_p(0)
         self._expects_unquantized_inputs = not is_xe3p
 
     @property
@@ -184,6 +137,8 @@ class XPUExperts(mk.FusedMoEExpertsModular):
             ):
                 w1 = w1.view(torch.float4_e2m1fn_x2)
                 w2 = w2.view(torch.float4_e2m1fn_x2)
+            # XpuFusedMoe takes the loaded [E, N, K] weights and their scales
+            # and relayouts them for this device's grouped GEMM itself.
             self.fused_moe_impl = XpuFusedMoe(
                 w13=w1,
                 w13_scales=self.w1_scale,
