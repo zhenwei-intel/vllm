@@ -89,6 +89,7 @@ class XPUExperts(mk.FusedMoEExpertsModular):
             (None, None),
             (kFp8StaticTensorSym, None),
             (kFp8StaticTensorSym, kFp8DynamicTensorSym),
+            (kFp8StaticTensorSym, kFp8StaticTensorSym),
         ]
         return (weight_key, activation_key) in SUPPORTED_W_A
 
@@ -154,12 +155,15 @@ class XPUExperts(mk.FusedMoEExpertsModular):
                 gemm1_clamp_limit=self.gemm1_clamp_limit,
             )
         assert self.fused_moe_impl is not None
+        if a1q_scale is not None and a1q_scale.ndim == 0:
+            a1q_scale = a1q_scale.reshape(1)
         self.fused_moe_impl.apply(
             output=output,
             hidden_states=hidden_states,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             a1q_scale=a1q_scale,
+            a2_scale=a2_scale,
         )
 
 
@@ -186,6 +190,7 @@ class XPUExpertsFp8(XPUExperts):
         SUPPORTED_W_A = [
             (kFp8StaticTensorSym, None),
             (kFp8StaticTensorSym, kFp8DynamicTensorSym),
+            (kFp8StaticTensorSym, kFp8StaticTensorSym),
         ]
         return (weight_key, activation_key) in SUPPORTED_W_A
 
