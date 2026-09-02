@@ -214,15 +214,7 @@ def get_fake_allocate_slots_fn(original_allocate_slots_fn: Callable):
             ]
             not_null_block_flags = [not block.is_null for block in cur_block_ids]
             block_ids = [1 if block else 0 for block in not_null_block_flags]
-            assert block_ids == cur_step_action.kv_cache_block_ids, (
-                f"step {cur_step_action_idx - 1}: block_ids={block_ids} "
-                f"expected={cur_step_action.kv_cache_block_ids} "
-                f"({num_new_tokens=}, {num_new_computed_tokens=}, "
-                f"{num_lookahead_tokens=}, "
-                f"num_computed_tokens={request.num_computed_tokens}, "
-                f"num_tokens={request.num_tokens}, "
-                f"num_spec={len(request.spec_token_ids)})"
-            )
+            assert block_ids == cur_step_action.kv_cache_block_ids
         return ret
 
     return fake_allocate_slots_fn
@@ -244,11 +236,7 @@ def get_fake_execute_model_fn(original_execute_model_fn: Callable):
             num_scheduled_tokens = next(
                 iter(scheduler_output.num_scheduled_tokens.values())
             )
-            assert num_scheduled_tokens == cur_step_action.num_scheduled_tokens, (
-                f"step {cur_step_action_idx - 1}: "
-                f"num_scheduled_tokens={num_scheduled_tokens} "
-                f"expected={cur_step_action.num_scheduled_tokens}"
-            )
+            assert num_scheduled_tokens == cur_step_action.num_scheduled_tokens
         mamba_groups = get_mamba_groups(self.kv_cache_config)
         mamba_spec, mamba_group_ids = next(iter(mamba_groups.items()))
         mamba_group_id = mamba_group_ids[0]
@@ -1100,11 +1088,7 @@ def _run_mamba_prefix_cache_mrv2(
             num_scheduled_tokens = next(
                 iter(scheduler_output.num_scheduled_tokens.values())
             )
-            assert num_scheduled_tokens == cur_step_action.num_scheduled_tokens, (
-                f"step {cur_step_action_idx - 1}: "
-                f"num_scheduled_tokens={num_scheduled_tokens} "
-                f"expected={cur_step_action.num_scheduled_tokens}"
-            )
+            assert num_scheduled_tokens == cur_step_action.num_scheduled_tokens
         ret = original_execute_model(self, scheduler_output, *args, **kwargs)
         if cur_step_action is not None and self.execute_model_state is not None:
             input_batch = self.execute_model_state.input_batch
@@ -1193,7 +1177,6 @@ def _run_mamba_prefix_cache_mrv2(
         global cur_step_action_idx
         global num_accepted_tokens
         for test_name, test_config in tests.items():
-            print(f"Running test case: {test_name}")
             num_accepted_tokens = test_config.num_accepted_tokens
             cur_step_action_idx = 0
             step_actions = test_config.step_actions
