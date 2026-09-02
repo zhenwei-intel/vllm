@@ -356,6 +356,27 @@ class XPUPlatform(Platform):
 
         # check and update parallel config
         parallel_config = vllm_config.parallel_config
+
+        # Log eager SP configuration
+        if parallel_config.use_eager_sequence_parallel:
+            from vllm.utils.import_utils import has_deep_symm
+
+            if not has_deep_symm():
+                logger.warning(
+                    "deep_symm not available, "
+                    "eager sequence parallelism will be disabled"
+                )
+                parallel_config.enable_eager_sp = False
+                parallel_config.enable_eager_sp_fuse_gemm_comms = False
+            else:
+                logger.info(
+                    "Eager sequence parallelism enabled "
+                    "(TP=%d, threshold=%d, fuse-gemm-comms=%s)",
+                    parallel_config.tensor_parallel_size,
+                    parallel_config.eager_sp_threshold,
+                    parallel_config.enable_eager_sp_fuse_gemm_comms,
+                )
+
         # Only override worker_cls if it's still the default "auto"
         # This allows custom workers (like vllm-omni workers) to be used on XPU
         if parallel_config.worker_cls == "auto":

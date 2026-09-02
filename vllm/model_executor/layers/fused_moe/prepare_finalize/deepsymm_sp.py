@@ -16,7 +16,10 @@ from vllm.distributed import get_tp_group
 from vllm.distributed.device_communicators.all2all import (
     DeepSymmAll2AllManager,
 )
-from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEConfig,
+    FusedMoEQuantConfig,
+)
 from vllm.model_executor.layers.fused_moe.utils import (
     moe_kernel_quantize_input,
 )
@@ -197,3 +200,42 @@ class XPUDeepSymmPrepareFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             handle=symm_handle,
             output=output,
         )
+
+
+def create_deepsymm_sp_kernel(
+    max_tokens_per_rank: int,
+    moe_config: FusedMoEConfig,
+    quant_config: FusedMoEQuantConfig | None = None,
+) -> mk.FusedMoEKernel:
+    """Create a FusedMoEKernel for the DeepSymm SP path.
+
+    Pairs XPUDeepSymmPrepareFinalize (fused allgather+permute /
+    unpermute+reduce_scatter) with XPUGroupedGemmExperts.
+    """
+    from vllm.model_executor.layers.fused_moe.experts.xpu_grouped_gemm_moe import (  # noqa: E501
+        XPUGroupedGemmExperts,
+    )
+    from vllm.model_executor.layers.fused_moe.modular_kernel import (
+        FusedMoEKernel,
+    )
+
+    tp_group = get_tp_group()
+    all2all_manager = DeepSymmAll2AllManager(
+        cpu_group=tp_group.cpu_group,
+        tp_group=tp_group.device_group,
+        max_tokens_per_rank=max_tokens_per_rank,
+    )
+
+    prepare_finalize = XPUDeepSymmPrepareFinalize(
+        all2all_manager=all2all_manager,
+    )
+
+    if quant_config is None:
+        quant_config = FusedMoEQuantConfig.make()
+
+    experts = XPUGroupedGemmExperts(
+        moe_config=moe_config,
+        quant_config=quant_config,
+    )
+
+    return FusedMoEKernel(prepare_finalize, experts)
