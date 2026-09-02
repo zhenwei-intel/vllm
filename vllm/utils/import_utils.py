@@ -432,6 +432,11 @@ def has_deep_ep() -> bool:
     return _has_module("deep_ep")
 
 
+def has_deepklox() -> bool:
+    """Whether the optional `deepklox` package is available."""
+    return _has_module("deepklox")
+
+
 DEEPEP_V2_MIN_NCCL_VERSION_RAW = 23004  # 2.30.4
 
 

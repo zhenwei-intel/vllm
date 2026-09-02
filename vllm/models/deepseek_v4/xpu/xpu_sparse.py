@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, cast
 
 import torch
 
+from vllm._xpu_ops import xpu_ops
 from vllm.forward_context import get_forward_context
 from vllm.models.deepseek_v4.attention import DeepseekV4Attention
 from vllm.models.deepseek_v4.common.ops import (
@@ -22,10 +23,6 @@ from vllm.models.deepseek_v4.sparse_mla import (
     DeepseekV4FlashMLAMetadata,
     DeepseekV4SparseMLABackend,
 )
-from vllm.models.deepseek_v4.xpu.xpu_sparse_decode_fp8 import (
-    xpu_sparse_decode_fp8,
-)
-from vllm.v1.attention.ops.xpu_mla_sparse import triton_bf16_mla_sparse_interface
 from vllm.v1.worker.workspace import current_workspace_manager
 
 if TYPE_CHECKING:
@@ -232,21 +229,21 @@ class DeepseekV4XPUAttention(DeepseekV4Attention):
         swa_lens = swa_metadata.decode_swa_lens
 
         assert swa_indices is not None and swa_lens is not None
-        xpu_sparse_decode_fp8(
+        xpu_ops.sparse_mla_decode(
             q=q,
-            kv_cache=kv_cache,
             swa_kv_cache=self.swa_cache_layer.kv_cache,
+            kv_cache=kv_cache,
             swa_only=swa_only,
-            topk_indices=topk_indices,
-            topk_lens=topk_lens,
             swa_indices=swa_indices,
             swa_lens=swa_lens,
-            attn_sink=self.attn_sink,
-            softmax_scale=self.scale,
+            topk_indices=topk_indices,
+            topk_lens=topk_lens,
             head_dim=self.head_dim,
             nope_head_dim=self.nope_head_dim,
             rope_head_dim=self.rope_head_dim,
-            out=output,
+            attn_sink=self.attn_sink,
+            softmax_scale=self.scale,
+            output=output,
         )
 
     def _forward_prefill(
@@ -357,12 +354,10 @@ class DeepseekV4XPUAttention(DeepseekV4Attention):
             )
 
             kv_ws = kv[:chunk_size].reshape(-1, 1, q.shape[-1])
-            out, _, _ = triton_bf16_mla_sparse_interface(
+            output[query_start:query_end] = xpu_ops.sparse_mla_prefill(
                 q=q[query_start:query_end],
                 kv=kv_ws,
                 indices=combined_indices.unsqueeze(1),
                 sm_scale=self.scale,
                 d_v=q.shape[-1],
-                block_dpe=0,
             )
-            output[query_start:query_end] = out

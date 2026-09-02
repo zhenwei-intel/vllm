@@ -10,6 +10,9 @@ from vllm.model_executor.custom_op import CustomOp
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_tilelang
 
+if current_platform.is_xpu():
+    from vllm._xpu_ops import xpu_ops
+
 
 def _has_tilelang_mhc() -> bool:
     if not has_tilelang():
@@ -175,7 +178,7 @@ class MHCPreOp(CustomOp):
         norm_weight: torch.Tensor | None = None,
         norm_eps: float = 0.0,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        return torch.ops._xpu_C.mhc_pre(
+        return xpu_ops.mhc_pre(
             residual,
             fn,
             hc_scale,
@@ -257,12 +260,7 @@ class MHCPostOp(CustomOp):
         post_layer_mix: torch.Tensor,
         comb_res_mix: torch.Tensor,
     ) -> torch.Tensor:
-        return torch.ops._xpu_C.mhc_post(
-            x,
-            residual,
-            post_layer_mix,
-            comb_res_mix,
-        )
+        return xpu_ops.mhc_post(x, residual, post_layer_mix, comb_res_mix)
 
 
 # --8<-- [start:hc_head]
@@ -361,13 +359,9 @@ class HCHeadOp(CustomOp):
         hc_mult, hidden_size = hidden_states.shape[-2:]
         outer_shape = hidden_states.shape[:-2]
         hs_flat = hidden_states.view(-1, hc_mult, hidden_size)
-        num_tokens = hs_flat.shape[0]
 
-        out = torch.empty(
-            num_tokens, hidden_size, dtype=torch.bfloat16, device=hidden_states.device
-        )
-        torch.ops._xpu_C.hc_head_fused(
-            hs_flat, hc_fn, hc_scale, hc_base, out, rms_norm_eps, hc_eps
+        out = xpu_ops.hc_head_fused(
+            hs_flat, hc_fn, hc_scale, hc_base, rms_norm_eps, hc_eps
         )
         return out.view(*outer_shape, hidden_size)
 
@@ -537,7 +531,7 @@ class MHCFusedPostPreOp(CustomOp):
         norm_weight: torch.Tensor | None = None,
         norm_eps: float = 0.0,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        return torch.ops._xpu_C.mhc_fused_post_pre(
+        return xpu_ops.mhc_fused_post_pre(
             x,
             residual,
             post_layer_mix,

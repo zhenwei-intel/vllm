@@ -11,9 +11,30 @@ from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.utils.import_utils import has_deepklox
 from vllm.utils.torch_utils import direct_register_custom_op
 
 logger = init_logger(__name__)
+
+_DEEPKLOX_AVAILABLE = has_deepklox()
+if _DEEPKLOX_AVAILABLE:
+    from deepklox import flash_mla_sparse_fwd as _deepklox_flash_mla_sparse_fwd
+    from deepklox import flash_mla_with_kvcache as _deepklox_flash_mla_with_kvcache
+    from deepklox import fp8_mqa_logits as _fp8_mqa_logits
+    from deepklox import fp8_paged_mqa_logits as _fp8_paged_mqa_logits
+    from deepklox import hc_head_fused as _hc_head_fused
+    from deepklox import mhc_fused_post_pre as _mhc_fused_post_pre
+    from deepklox import mhc_post as _mhc_post
+    from deepklox import mhc_pre as _mhc_pre
+
+    logger.info_once("DeepKLOX available, using DeepKLOX kernels.")
+else:
+    _fp8_mqa_logits = torch.ops._xpu_C.fp8_mqa_logits
+    _fp8_paged_mqa_logits = torch.ops._xpu_C.fp8_paged_mqa_logits
+    _hc_head_fused = torch.ops._xpu_C.hc_head_fused
+    _mhc_fused_post_pre = torch.ops._xpu_C.mhc_fused_post_pre
+    _mhc_post = torch.ops._xpu_C.mhc_post
+    _mhc_pre = torch.ops._xpu_C.mhc_pre
 
 if TYPE_CHECKING:
 
@@ -303,7 +324,7 @@ def _xpu_fp8_mqa_logits_impl(
     cu_seqlen_ks: torch.Tensor,
     cu_seqlen_ke: torch.Tensor,
 ) -> torch.Tensor:
-    return torch.ops._xpu_C.fp8_mqa_logits(
+    return _fp8_mqa_logits(
         q,
         k_quant,
         k_scale,
@@ -337,7 +358,7 @@ def _xpu_fp8_paged_mqa_logits_impl(
     schedule_metadata: torch.Tensor,
     max_model_len: int,
 ) -> torch.Tensor:
-    return torch.ops._xpu_C.fp8_paged_mqa_logits(
+    return _fp8_paged_mqa_logits(
         q,
         kv_cache,
         weights,
@@ -1212,6 +1233,185 @@ class xpu_ops:
             CACHE_ENABLED=cache_enabled,
             BLOCK_DSTATE=BLOCK_DSTATE,
         )
+
+    @staticmethod
+    def mhc_pre(
+        residual: torch.Tensor,
+        fn: torch.Tensor,
+        hc_scale: torch.Tensor,
+        hc_base: torch.Tensor,
+        rms_eps: float,
+        hc_pre_eps: float,
+        hc_sinkhorn_eps: float,
+        hc_post_mult_value: float,
+        sinkhorn_repeat: int,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        return _mhc_pre(
+            residual,
+            fn,
+            hc_scale,
+            hc_base,
+            rms_eps,
+            hc_pre_eps,
+            hc_sinkhorn_eps,
+            hc_post_mult_value,
+            sinkhorn_repeat,
+        )
+
+    @staticmethod
+    def mhc_post(
+        x: torch.Tensor,
+        residual: torch.Tensor,
+        post_layer_mix: torch.Tensor,
+        comb_res_mix: torch.Tensor,
+    ) -> torch.Tensor:
+        return _mhc_post(x, residual, post_layer_mix, comb_res_mix)
+
+    @staticmethod
+    def hc_head_fused(
+        hs_flat: torch.Tensor,
+        hc_fn: torch.Tensor,
+        hc_scale: torch.Tensor,
+        hc_base: torch.Tensor,
+        rms_norm_eps: float,
+        hc_eps: float,
+    ) -> torch.Tensor:
+        num_tokens, _, hidden_size = hs_flat.shape
+        out = torch.empty(
+            num_tokens,
+            hidden_size,
+            dtype=torch.bfloat16,
+            device=hs_flat.device,
+        )
+        _hc_head_fused(hs_flat, hc_fn, hc_scale, hc_base, out, rms_norm_eps, hc_eps)
+        return out
+
+    @staticmethod
+    def mhc_fused_post_pre(
+        x: torch.Tensor,
+        residual: torch.Tensor,
+        post_layer_mix: torch.Tensor,
+        comb_res_mix: torch.Tensor,
+        fn: torch.Tensor,
+        hc_scale: torch.Tensor,
+        hc_base: torch.Tensor,
+        rms_eps: float,
+        hc_pre_eps: float,
+        hc_sinkhorn_eps: float,
+        hc_post_mult_value: float,
+        sinkhorn_repeat: int,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        return _mhc_fused_post_pre(
+            x,
+            residual,
+            post_layer_mix,
+            comb_res_mix,
+            fn,
+            hc_scale,
+            hc_base,
+            rms_eps,
+            hc_pre_eps,
+            hc_sinkhorn_eps,
+            hc_post_mult_value,
+            sinkhorn_repeat,
+        )
+
+    @staticmethod
+    def sparse_mla_decode(
+        q: torch.Tensor,
+        swa_kv_cache: torch.Tensor,
+        kv_cache: torch.Tensor | None,
+        swa_only: bool,
+        swa_indices: torch.Tensor,
+        swa_lens: torch.Tensor,
+        topk_indices: torch.Tensor | None,
+        topk_lens: torch.Tensor | None,
+        head_dim: int,
+        nope_head_dim: int,
+        rope_head_dim: int,
+        attn_sink: float,
+        softmax_scale: float,
+        output: torch.Tensor,
+    ) -> None:
+        if _DEEPKLOX_AVAILABLE:
+            swa_cache_4d = swa_kv_cache.unsqueeze(-2).view(torch.float8_e4m3fn)
+            kv_cache_4d = (
+                kv_cache.unsqueeze(-2).view(torch.float8_e4m3fn)
+                if kv_cache is not None
+                else None
+            )
+            q_4d = q.unsqueeze(1)
+            out_4d = output.unsqueeze(1)
+            _deepklox_flash_mla_with_kvcache(
+                q=q_4d,
+                k_cache=swa_cache_4d,
+                block_table=None,
+                cache_seqlens=None,
+                head_dim_v=head_dim,
+                tile_scheduler_metadata=None,
+                is_fp8_kvcache=True,
+                indices=swa_indices,
+                topk_length=swa_lens,
+                softmax_scale=softmax_scale,
+                attn_sink=attn_sink,
+                extra_k_cache=kv_cache_4d if not swa_only else None,
+                extra_indices_in_kvcache=topk_indices if not swa_only else None,
+                extra_topk_length=topk_lens if not swa_only else None,
+                out=out_4d,
+            )
+        else:
+            from vllm.models.deepseek_v4.xpu.xpu_sparse_decode_fp8 import (
+                xpu_sparse_decode_fp8 as _xpu_sparse_decode_fp8,
+            )
+
+            _xpu_sparse_decode_fp8(
+                q=q,
+                kv_cache=kv_cache,
+                swa_kv_cache=swa_kv_cache,
+                swa_only=swa_only,
+                topk_indices=topk_indices,
+                topk_lens=topk_lens,
+                swa_indices=swa_indices,
+                swa_lens=swa_lens,
+                attn_sink=attn_sink,
+                softmax_scale=softmax_scale,
+                head_dim=head_dim,
+                nope_head_dim=nope_head_dim,
+                rope_head_dim=rope_head_dim,
+                out=output,
+            )
+
+    @staticmethod
+    def sparse_mla_prefill(
+        q: torch.Tensor,
+        kv: torch.Tensor,
+        indices: torch.Tensor,
+        sm_scale: float,
+        d_v: int,
+    ) -> torch.Tensor:
+        if _DEEPKLOX_AVAILABLE:
+            out, _, _ = _deepklox_flash_mla_sparse_fwd(
+                q=q,
+                kv=kv,
+                indices=indices,
+                sm_scale=sm_scale,
+                d_v=d_v,
+                return_softmax_lse=True,
+            )
+        else:
+            from vllm.v1.attention.ops.xpu_mla_sparse import (
+                triton_bf16_mla_sparse_interface as _triton_bf16_mla_sparse_interface,
+            )
+
+            out, _, _ = _triton_bf16_mla_sparse_interface(
+                q=q,
+                kv=kv,
+                indices=indices,
+                sm_scale=sm_scale,
+                d_v=d_v,
+                block_dpe=0,
+            )
+        return out
 
     @staticmethod
     def register_ops_once() -> None:
