@@ -85,6 +85,72 @@ class XPUGroupedGemmExperts(mk.FusedMoEExpertsModular):
         self.is_int4 = False
         self.is_mxfp4 = False
 
+    def _ensure_weights_layout(
+        self,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+    ) -> None:
+        """One-time conversion from checkpoint [E, N, K] to kernel layout.
+
+        Uses the same helpers and ``xpu_fused_moe`` marker as
+        ``XpuFusedMoe.__init__`` so the two paths never double-convert.
+        """
+        from vllm_xpu_kernels.fused_moe_interface import (
+            _to_xe2_layout,
+            _to_xe3_layout,
+            _uses_xe2_grouped_gemm,
+            implement_zp,
+        )
+
+        w1_scale = self.w1_scale
+        w2_scale = self.w2_scale
+        num_experts = self.moe_config.num_local_experts
+
+        is_fp8 = w1.dtype in (torch.float8_e4m3fn, torch.float8_e5m2)
+        is_mxfp4 = w1.dtype == torch.float4_e2m1fn_x2
+        is_int4 = w1.dtype in (torch.uint8, torch.int8) and w1_scale is not None
+        is_mxfp8 = (
+            is_fp8
+            and w1_scale is not None
+            and w1_scale.dtype in (torch.uint8, torch.float8_e8m0fnu)
+        )
+        is_block_fp8 = (
+            is_fp8
+            and w1_scale is not None
+            and w1_scale.dtype == torch.float32
+            and w1_scale.ndim == 3
+        )
+
+        self.is_fp8 = is_fp8 and not is_mxfp8 and not is_block_fp8
+        self.is_int4 = is_int4
+        self.is_mxfp4 = is_mxfp4
+
+        if is_int4:
+            w1_tmp = torch.empty_like(w1, dtype=torch.int8)
+            w2_tmp = torch.empty_like(w2, dtype=torch.int8)
+            for i in range(num_experts):
+                w1_tmp[i] = implement_zp(w1[i])
+                w2_tmp[i] = implement_zp(w2[i])
+            w1.data = w1_tmp.contiguous()
+            w2.data = w2_tmp.contiguous()
+
+        to_kernel_layout = (
+            _to_xe2_layout if _uses_xe2_grouped_gemm(w1) else _to_xe3_layout
+        )
+
+        w1_data, w1_scale_data = to_kernel_layout(w1, w1_scale)
+        w2_data, w2_scale_data = to_kernel_layout(w2, w2_scale)
+
+        w1.data = w1_data
+        w2.data = w2_data
+
+        if w1_scale is not None and w1_scale_data is not w1_scale:
+            self.quant_config._w1.scale = w1_scale_data
+        if w2_scale is not None and w2_scale_data is not w2_scale:
+            self.quant_config._w2.scale = w2_scale_data
+
+        w1.xpu_fused_moe = True
+
     @property
     def expects_unquantized_inputs(self) -> bool:
         return False
@@ -99,10 +165,13 @@ class XPUGroupedGemmExperts(mk.FusedMoEExpertsModular):
         # Input is pre-permuted: (total_rows * topk, hidden_size).
         # Treat it as M = total_rows * topk with topk=1 for workspace
         # allocation since permutation is already done.
-        # XPU weight layout: [E, K, N] (not [E, N, K]).
+        #
+        # Checkpoint layout is [E, N, K], kernel layout is [E, K, N].
+        # Read N from the correct axis depending on whether
+        # _ensure_weights_layout has run yet.
         assert len(w1.shape) == 3 and len(w2.shape) == 3
         E = w1.shape[0]
-        N = w1.shape[-1]  # 2*inter_size (output dim is last for XPU)
+        N = w1.shape[-1] if hasattr(w1, "xpu_fused_moe") else w1.shape[-2]
         K = a1.size(-1)
         M = a1.size(0)
         topk = 1
@@ -193,6 +262,9 @@ class XPUGroupedGemmExperts(mk.FusedMoEExpertsModular):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
     ) -> None:
+        if not hasattr(w1, "xpu_fused_moe"):
+            self._ensure_weights_layout(w1, w2)
+
         assert expert_tokens_meta is not None, (
             "XPUGroupedGemmExperts requires expert_tokens_meta with "
             "rows_per_expert from PrepareFinalize"
@@ -216,8 +288,8 @@ class XPUGroupedGemmExperts(mk.FusedMoEExpertsModular):
         # MXFP4 packs 2 values per byte — logical hidden dim is 2x stored
         gemm_hidden_size = 2 * hidden_size if self.is_mxfp4 else hidden_size
 
-        # XPU weight layout must be [E, K, N] (transposed by
-        # prepare_fp8_moe_layer_for_xpu during weight loading).
+        # After process_weights_after_loading the weight layout is
+        # [E, K, N] so the last dimension is the output size.
         inter_size = w1.shape[-1] // 2
         is_relu2_no_mul = activation == MoEActivation.RELU2_NO_MUL
         inter_size_scale = 2 if is_relu2_no_mul else 1
