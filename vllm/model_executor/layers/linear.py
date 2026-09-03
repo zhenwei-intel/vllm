@@ -201,6 +201,12 @@ class UnquantizedLinearMethod(LinearMethodBase):
 
             dispatch_cpu_unquantized_gemm(layer, remove_weight=True)
 
+        from vllm.model_executor.kernels.linear.fused_comm import (
+            init_fused_comm_kernel,
+        )
+
+        layer.fused_comm = init_fused_comm_kernel(self)
+
     def apply(
         self,
         layer: torch.nn.Module,
@@ -585,6 +591,13 @@ class ColumnParallelLinear(LinearBase):
             return output
         output_bias = self.bias if self.skip_bias_add else None
         return output, output_bias
+
+    def fused_ag_forward(
+        self, input_shard: torch.Tensor, group_name: str
+    ) -> torch.Tensor:
+        """Fused AllGather + GEMM for eager sequence parallelism."""
+        bias = self.bias if not self.skip_bias_add else None
+        return self.fused_comm.fused_ag_gemm(self, input_shard, bias, group_name)
 
     def extra_repr(self) -> str:
         s = f"in_features={self.input_size}"
@@ -1659,6 +1672,18 @@ class RowParallelLinear(LinearBase):
             return output
         output_bias = self.bias if self.skip_bias_add else None
         return output, output_bias
+
+    def fused_rs_forward(self, input_: torch.Tensor, group_name: str) -> torch.Tensor:
+        """Fused GEMM + ReduceScatter for eager sequence parallelism."""
+        if self.input_is_parallel:
+            input_parallel = input_
+        else:
+            split_input = split_tensor_along_last_dim(
+                input_, num_partitions=self.tp_size
+            )
+            input_parallel = split_input[self.tp_rank].contiguous()
+        bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
+        return self.fused_comm.fused_gemm_rs(self, input_parallel, bias_, group_name)
 
     def extra_repr(self) -> str:
         s = f"in_features={self.input_size_per_partition}"
