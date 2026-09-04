@@ -39,6 +39,10 @@ from vllm.distributed import (
     get_ep_group,
     get_pp_group,
     get_tensor_model_parallel_world_size,
+    tensor_model_parallel_all_gather,
+)
+from vllm.distributed.communication_op import (
+    tensor_model_parallel_reduce_scatter,
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
@@ -82,6 +86,7 @@ from vllm.model_executor.models.utils import (
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
+    sequence_parallel_chunk,
 )
 
 logger = init_logger(__name__)
@@ -97,6 +102,7 @@ class HYV3FeedForward(nn.Module):
         reduce_results: bool = True,
         expert_gate: torch.nn.Linear | None = None,
         prefix: str = "",
+        disable_tp: bool = False,
     ) -> None:
         super().__init__()
         self.gate_up_proj = MergedColumnParallelLinear(
@@ -105,6 +111,7 @@ class HYV3FeedForward(nn.Module):
             bias=False,
             quant_config=quant_config,
             prefix=f"{prefix}.gate_up_proj",
+            disable_tp=disable_tp,
         )
         self.down_proj = RowParallelLinear(
             intermediate_size,
@@ -113,6 +120,7 @@ class HYV3FeedForward(nn.Module):
             quant_config=quant_config,
             reduce_results=reduce_results,
             prefix=f"{prefix}.down_proj",
+            disable_tp=disable_tp,
         )
         if hidden_act != "silu":
             raise ValueError(
@@ -134,8 +142,10 @@ class HYV3MoEFused(nn.Module):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         enable_eplb: bool = False,
+        enable_eager_sp: bool = False,
     ):
         super().__init__()
+        self.enable_eager_sp = enable_eager_sp
         self.tp_size = get_tensor_model_parallel_world_size()
         self.ep_group = get_ep_group().device_group
         self.ep_rank = get_ep_group().rank_in_group
@@ -178,6 +188,7 @@ class HYV3MoEFused(nn.Module):
                 quant_config=quant_config,
                 prefix=f"{prefix}",
                 reduce_results=False,
+                disable_tp=self.enable_eager_sp,
             )
         else:
             self.shared_mlp = None
@@ -206,6 +217,8 @@ class HYV3MoEFused(nn.Module):
             e_score_correction_bias=e_score_correction_bias,
             n_shared_experts=config.num_shared_experts,
             shared_experts=self.shared_mlp,
+            gate=self.gate,
+            enable_eager_sp=self.enable_eager_sp,
         )
 
     def forward(
@@ -216,10 +229,8 @@ class HYV3MoEFused(nn.Module):
         hidden_dim = hidden_states.shape[-1]
         hidden_states = hidden_states.view(-1, hidden_dim)
 
-        router_logits, _ = self.gate(hidden_states)
-
         final_hidden_states = self.experts(
-            hidden_states=hidden_states, router_logits=router_logits
+            hidden_states=hidden_states, router_logits=hidden_states
         )
         return final_hidden_states.view(orig_shape)
 
@@ -360,9 +371,15 @@ class HYV3DecoderLayer(nn.Module):
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        eager_sp: bool = False,
+        fuse_gemm_comms: bool = False,
+        sp_threshold: int = 256,
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
+        self.eager_sp = eager_sp
+        self.fuse_gemm_comms = fuse_gemm_comms
+        self._sp_threshold = sp_threshold
         layer_idx = int(prefix.split(".")[-1])
         max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
         self.self_attn = HYV3Attention(
@@ -378,6 +395,8 @@ class HYV3DecoderLayer(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
         )
+        if self.eager_sp:
+            self.self_attn.o_proj.reduce_results = False
         self.input_layernorm = RMSNorm(config.hidden_size, config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(config.hidden_size, config.rms_norm_eps)
         if not hasattr(config, "first_k_dense_replace"):
@@ -389,11 +408,15 @@ class HYV3DecoderLayer(nn.Module):
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
                 prefix=f"{prefix}.mlp",
+                reduce_results=not self.eager_sp,
             )
             self.block_type = "feedforward"
         else:
             self.mlp = HYV3MoEFused(
-                config=config, quant_config=quant_config, prefix=f"{prefix}.mlp"
+                config=config,
+                quant_config=quant_config,
+                prefix=f"{prefix}.mlp",
+                enable_eager_sp=self.eager_sp,
             )
             self.block_type = "moe"
 
@@ -403,6 +426,16 @@ class HYV3DecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
         idx: int = -1,
+    ) -> torch.Tensor:
+        if self.eager_sp:
+            return self._forward_eager_sp(positions, hidden_states, residual)
+        return self._forward_standard(positions, hidden_states, residual)
+
+    def _forward_standard(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor | None,
     ) -> torch.Tensor:
         if residual is None:
             residual = hidden_states
@@ -420,6 +453,95 @@ class HYV3DecoderLayer(nn.Module):
         hidden_states = self.mlp(hidden_states)
 
         return hidden_states, residual
+
+    def _forward_eager_sp(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor | None,
+    ) -> torch.Tensor:
+        if residual is None:
+            hidden_states = sequence_parallel_chunk(hidden_states)
+            residual = hidden_states
+            hidden_states = self.input_layernorm(hidden_states)
+        else:
+            hidden_states, residual = self.input_layernorm(hidden_states, residual)
+
+        use_fused = (
+            self.fuse_gemm_comms and hidden_states.shape[0] >= self._sp_threshold
+        )
+
+        if use_fused:
+            hidden_states = self._attn_fused(positions, hidden_states)
+        else:
+            hidden_states = tensor_model_parallel_all_gather(hidden_states, dim=0)
+            hidden_states = self.self_attn(
+                positions=positions, hidden_states=hidden_states
+            )
+            hidden_states = tensor_model_parallel_reduce_scatter(
+                hidden_states, dim=0
+            )
+
+        hidden_states, residual = self.post_attention_layernorm(
+            hidden_states, residual
+        )
+
+        if self.block_type == "moe":
+            hidden_states = self.mlp(hidden_states)
+        else:
+            if use_fused:
+                hidden_states = self._mlp_fused(hidden_states)
+            else:
+                hidden_states = tensor_model_parallel_all_gather(
+                    hidden_states, dim=0
+                )
+                hidden_states = self.mlp(hidden_states)
+                hidden_states = tensor_model_parallel_reduce_scatter(
+                    hidden_states, dim=0
+                )
+
+        return hidden_states, residual
+
+    def _attn_fused(self, positions, hidden_states):
+        from vllm.distributed import get_tp_group
+
+        group_name = get_tp_group().device_group.group_name
+        attn = self.self_attn
+
+        qkv = attn.qkv_proj.fused_ag_forward(hidden_states, group_name)
+
+        q, k, v = qkv.split(
+            [attn.q_size, attn.kv_size, attn.kv_size], dim=-1
+        )
+        if attn.use_qk_norm:
+            q = attn.q_norm(
+                q.view(
+                    *q.shape[:-1], q.shape[-1] // attn.head_dim, attn.head_dim
+                )
+            ).view(q.shape)
+            k = attn.k_norm(
+                k.view(
+                    *k.shape[:-1], k.shape[-1] // attn.head_dim, attn.head_dim
+                )
+            ).view(k.shape)
+        q, k = attn.rotary_emb(positions, q, k)
+        attn_output = attn.attn(q, k, v)
+        attn_output = attn_output.view(q.shape[0], -1)
+
+        hidden_states = attn.o_proj.fused_rs_forward(attn_output, group_name)
+        return hidden_states
+
+    def _mlp_fused(self, hidden_states):
+        from vllm.distributed import get_tp_group
+
+        group_name = get_tp_group().device_group.group_name
+        mlp = self.mlp
+
+        gate_up = mlp.gate_up_proj.fused_ag_forward(hidden_states, group_name)
+        out = mlp.act_fn(gate_up)
+
+        hidden_states = mlp.down_proj.fused_rs_forward(out, group_name)
+        return hidden_states
 
 
 @support_torch_compile
@@ -439,6 +561,8 @@ class HYV3Model(nn.Module, MixtureOfExperts):
         self.config = config
         self.quant_config = quant_config
 
+        self.eager_sp = parallel_config.use_eager_sequence_parallel
+
         self.embed_tokens = VocabParallelEmbedding(
             config.vocab_size,
             config.hidden_size,
@@ -451,6 +575,12 @@ class HYV3Model(nn.Module, MixtureOfExperts):
                 cache_config=cache_config,
                 quant_config=quant_config,
                 prefix=prefix,
+                eager_sp=self.eager_sp,
+                fuse_gemm_comms=(
+                    parallel_config.enable_eager_sp_fuse_gemm_comms
+                    and self.eager_sp
+                ),
+                sp_threshold=parallel_config.eager_sp_threshold,
             ),
             prefix=f"{prefix}.layers",
         )
@@ -541,10 +671,9 @@ class HYV3Model(nn.Module, MixtureOfExperts):
                 {"hidden_states": hidden_states, "residual": residual}
             )
 
-        hidden_states = hidden_states + residual
-        residual = hidden_states
-
-        hidden_states = self.norm(hidden_states)
+        hidden_states, _ = self.norm(hidden_states, residual)
+        if self.eager_sp:
+            hidden_states = tensor_model_parallel_all_gather(hidden_states, dim=0)
 
         return hidden_states
 
@@ -576,6 +705,8 @@ class HYV3Model(nn.Module, MixtureOfExperts):
                 if name.endswith(".bias") and name not in params_dict:
                     continue
 
+                if name not in params_dict:
+                    continue
                 if is_pp_missing_parameter(name, self):
                     continue
 
@@ -597,6 +728,8 @@ class HYV3Model(nn.Module, MixtureOfExperts):
                     continue
                 is_expert_weight = True
                 name_mapped = name.replace(weight_name, param_name)
+                if name_mapped not in params_dict:
+                    continue
                 if is_pp_missing_parameter(name_mapped, self):
                     continue
 
@@ -617,6 +750,8 @@ class HYV3Model(nn.Module, MixtureOfExperts):
                 if is_expert_weight:
                     continue
                 if name is None:
+                    continue
+                if name not in params_dict:
                     continue
                 if is_pp_missing_parameter(name, self):
                     continue

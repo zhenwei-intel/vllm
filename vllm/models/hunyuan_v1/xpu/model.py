@@ -39,6 +39,10 @@ from vllm.distributed import (
     get_ep_group,
     get_pp_group,
     get_tensor_model_parallel_world_size,
+    tensor_model_parallel_all_gather,
+)
+from vllm.distributed.communication_op import (
+    tensor_model_parallel_reduce_scatter,
 )
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
@@ -65,9 +69,6 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
 )
-from vllm.sequence import IntermediateTensors
-from vllm.v1.attention.backend import AttentionType
-
 from vllm.model_executor.models.interfaces import (
     EagleModelMixin,
     MixtureOfExperts,
@@ -82,7 +83,10 @@ from vllm.model_executor.models.utils import (
     is_pp_missing_parameter,
     make_layers,
     maybe_prefix,
+    sequence_parallel_chunk,
 )
+from vllm.sequence import IntermediateTensors
+from vllm.v1.attention.backend import AttentionType
 
 
 def _is_moe(config: PretrainedConfig) -> bool:
@@ -113,6 +117,7 @@ class HunYuanMLP(nn.Module):
         bias: bool = False,
         prefix: str = "",
         reduce_results: bool = True,
+        disable_tp: bool = False,
     ) -> None:
         super().__init__()
         self.gate_up_proj = MergedColumnParallelLinear(
@@ -121,6 +126,7 @@ class HunYuanMLP(nn.Module):
             bias=bias,
             quant_config=quant_config,
             prefix=f"{prefix}.gate_up_proj",
+            disable_tp=disable_tp,
         )
         self.down_proj = RowParallelLinear(
             input_size=intermediate_size,
@@ -129,6 +135,7 @@ class HunYuanMLP(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.down_proj",
             reduce_results=reduce_results,
+            disable_tp=disable_tp,
         )
         if hidden_act != "silu":
             raise ValueError(
@@ -355,9 +362,11 @@ class HunYuanSparseMoeBlock(nn.Module):
         layer_id: int = -1,
         prefix: str = "",
         enable_eplb: bool = False,
+        enable_eager_sp: bool = False,
     ):
         super().__init__()
         self.tp_size = get_tensor_model_parallel_world_size()
+        self.enable_eager_sp = enable_eager_sp
 
         self.ep_group = get_ep_group().device_group
         self.ep_rank = get_ep_group().rank_in_group
@@ -420,6 +429,7 @@ class HunYuanSparseMoeBlock(nn.Module):
                 quant_config=quant_config,
                 reduce_results=False,
                 prefix=f"{prefix}.shared_mlp",
+                disable_tp=self.enable_eager_sp,
             )
         else:
             self.shared_mlp = None
@@ -435,6 +445,7 @@ class HunYuanSparseMoeBlock(nn.Module):
             prefix=f"{prefix}.experts",
             enable_eplb=self.enable_eplb,
             num_redundant_experts=self.n_redundant_experts,
+            enable_eager_sp=self.enable_eager_sp,
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -459,11 +470,17 @@ class HunYuanDecoderLayer(nn.Module):
         prefix: str = "",
         layer_id: int = -1,
         enable_eplb: bool = False,
+        eager_sp: bool = False,
+        fuse_gemm_comms: bool = False,
+        sp_threshold: int = 256,
     ) -> None:
         super().__init__()
         assert layer_id >= 0
         self.layer_id = layer_id
         self.hidden_size = config.hidden_size
+        self.eager_sp = eager_sp
+        self.fuse_gemm_comms = fuse_gemm_comms
+        self._sp_threshold = sp_threshold
         self.intermediate_size = (
             config.intermediate_size
             if isinstance(config.intermediate_size, int)
@@ -512,6 +529,9 @@ class HunYuanDecoderLayer(nn.Module):
         else:
             raise RuntimeError(f"Unsupported attention type: {attention_type}")
 
+        if self.eager_sp:
+            self.self_attn.o_proj.reduce_results = False
+
         if _is_moe(config):
             self.mlp = HunYuanSparseMoeBlock(
                 config=config,
@@ -519,6 +539,7 @@ class HunYuanDecoderLayer(nn.Module):
                 layer_id=layer_id,
                 prefix=f"{prefix}.mlp",
                 enable_eplb=enable_eplb,
+                enable_eager_sp=self.eager_sp,
             )
         else:
             self.mlp = HunYuanMLP(
@@ -528,6 +549,7 @@ class HunYuanDecoderLayer(nn.Module):
                 quant_config=quant_config,
                 bias=getattr(config, "mlp_bias", False),
                 prefix=f"{prefix}.mlp",
+                reduce_results=not self.eager_sp,
             )
 
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -536,6 +558,17 @@ class HunYuanDecoderLayer(nn.Module):
         )
 
     def forward(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor | None,
+        kv_states: tuple[torch.Tensor] | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if self.eager_sp:
+            return self._forward_eager_sp(positions, hidden_states, residual, kv_states)
+        return self._forward_standard(positions, hidden_states, residual, kv_states)
+
+    def _forward_standard(
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
@@ -557,6 +590,96 @@ class HunYuanDecoderLayer(nn.Module):
         hidden_states = self.mlp(hidden_states)
         return hidden_states, residual, ori_kv_states
 
+    def _forward_eager_sp(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor | None,
+        kv_states: tuple[torch.Tensor] | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if residual is None:
+            hidden_states = sequence_parallel_chunk(hidden_states)
+            residual = hidden_states
+            hidden_states = self.input_layernorm(hidden_states)
+        else:
+            hidden_states, residual = self.input_layernorm(hidden_states, residual)
+
+        use_fused = (
+            self.fuse_gemm_comms and hidden_states.shape[0] >= self._sp_threshold
+        )
+
+        if use_fused:
+            hidden_states, ori_kv_states = self._attn_fused(
+                positions, hidden_states, kv_states
+            )
+        else:
+            hidden_states = tensor_model_parallel_all_gather(hidden_states, dim=0)
+            hidden_states, ori_kv_states = self.self_attn(
+                positions=positions,
+                hidden_states=hidden_states,
+                kv_states=kv_states,
+            )
+            hidden_states = tensor_model_parallel_reduce_scatter(hidden_states, dim=0)
+
+        hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
+
+        if isinstance(self.mlp, HunYuanSparseMoeBlock):
+            hidden_states = self.mlp(hidden_states)
+        else:
+            if use_fused:
+                hidden_states = self._mlp_fused(hidden_states)
+            else:
+                hidden_states = tensor_model_parallel_all_gather(hidden_states, dim=0)
+                hidden_states = self.mlp(hidden_states)
+                hidden_states = tensor_model_parallel_reduce_scatter(
+                    hidden_states, dim=0
+                )
+
+        return hidden_states, residual, ori_kv_states
+
+    def _attn_fused(self, positions, hidden_states, kv_states=None):
+        from vllm.distributed import get_tp_group
+
+        group_name = get_tp_group().device_group.group_name
+        attn = self.self_attn
+
+        if isinstance(attn, HunYuanCrossAttention):
+            assert kv_states is not None
+            ori_k, v = kv_states
+            k = ori_k
+            q = attn.q_proj.fused_ag_forward(hidden_states, group_name)
+            k_tmp = torch.empty_like(k)
+            q, _ = attn.rotary_emb(positions, q, k_tmp)
+            if attn.use_qk_norm:
+                q = attn.query_layernorm(q.view(-1, attn.num_heads, attn.head_dim))
+                k = attn.key_layernorm(k.view(-1, attn.num_kv_heads, attn.head_dim))
+            attn_output = attn.attn(q, k, v)
+            attn_output = attn_output.view(q.shape[0], -1)
+            hidden_states = attn.o_proj.fused_rs_forward(attn_output, group_name)
+            return hidden_states, (ori_k, v)
+        else:
+            qkv = attn.qkv_proj.fused_ag_forward(hidden_states, group_name)
+            q, k, v = qkv.split([attn.q_size, attn.kv_size, attn.kv_size], dim=-1)
+            q, k = attn.rotary_emb(positions, q, k)
+            ori_k = k
+            if attn.use_qk_norm:
+                q = attn.query_layernorm(q.view(-1, attn.num_heads, attn.head_dim))
+                k = attn.key_layernorm(k.view(-1, attn.num_kv_heads, attn.head_dim))
+            attn_output = attn.attn(q, k, v)
+            attn_output = attn_output.view(q.shape[0], -1)
+            hidden_states = attn.o_proj.fused_rs_forward(attn_output, group_name)
+            return hidden_states, (ori_k, v)
+
+    def _mlp_fused(self, hidden_states):
+        from vllm.distributed import get_tp_group
+
+        group_name = get_tp_group().device_group.group_name
+        mlp = self.mlp
+        gate_up = mlp.gate_up_proj.fused_ag_forward(hidden_states, group_name)
+        out = mlp.act_fn(gate_up)
+        hidden_states = mlp.down_proj.fused_rs_forward(out, group_name)
+        return hidden_states
+
 
 @support_torch_compile(
     dynamic_arg_dims={
@@ -573,10 +696,13 @@ class HunYuanModel(nn.Module, EagleModelMixin):
         config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
+        parallel_config = vllm_config.parallel_config
 
-        eplb_config = vllm_config.parallel_config.eplb_config
-        enable_eplb = vllm_config.parallel_config.enable_eplb
+        eplb_config = parallel_config.eplb_config
+        enable_eplb = parallel_config.enable_eplb
         self.num_redundant_experts = eplb_config.num_redundant_experts
+
+        self.eager_sp = parallel_config.use_eager_sequence_parallel
 
         self.config = config
         self.quant_config = quant_config
@@ -602,6 +728,11 @@ class HunYuanModel(nn.Module, EagleModelMixin):
                 quant_config=quant_config,
                 prefix=prefix,
                 enable_eplb=enable_eplb,
+                eager_sp=self.eager_sp,
+                fuse_gemm_comms=(
+                    parallel_config.enable_eager_sp_fuse_gemm_comms and self.eager_sp
+                ),
+                sp_threshold=parallel_config.eager_sp_threshold,
             ),
             prefix=f"{prefix}.layers",
         )
@@ -659,6 +790,9 @@ class HunYuanModel(nn.Module, EagleModelMixin):
             )
 
         hidden_states, _ = self.norm(hidden_states, residual)
+
+        if self.eager_sp:
+            hidden_states = tensor_model_parallel_all_gather(hidden_states, dim=0)
 
         if len(aux_hidden_states) > 0:
             return hidden_states, aux_hidden_states
@@ -756,6 +890,8 @@ class HunYuanModel(nn.Module, EagleModelMixin):
                 name = name.replace(weight_name, param_name)
                 if name.endswith(".bias") and name not in params_dict:
                     continue
+                if name not in params_dict:
+                    continue
 
                 if is_pp_missing_parameter(name, self):
                     continue
@@ -780,6 +916,8 @@ class HunYuanModel(nn.Module, EagleModelMixin):
                     continue
                 name = name.replace(weight_name, param_name)
                 if name.endswith(".bias") and name not in params_dict:
+                    continue
+                if name not in params_dict:
                     continue
 
                 if is_pp_missing_parameter(name, self):
@@ -815,6 +953,8 @@ class HunYuanModel(nn.Module, EagleModelMixin):
                     name_mapped = name.replace(weight_name, param_name)
                     if is_pp_missing_parameter(name_mapped, self):
                         continue
+                    if name_mapped not in params_dict:
+                        continue
                     param = params_dict[name_mapped]
                     weight_loader = typing.cast(
                         Callable[..., bool], param.weight_loader
@@ -843,6 +983,8 @@ class HunYuanModel(nn.Module, EagleModelMixin):
                     if "mlp.gate.wg." in name:
                         name = name.replace("wg.", "")
 
+                    if name not in params_dict:
+                        continue
                     param = params_dict[name]
                     weight_loader = getattr(
                         param, "weight_loader", default_weight_loader
@@ -945,6 +1087,7 @@ class HunYuanMoEV1ForCausalLM(HunyuanV1ModelBase, MixtureOfExperts):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
 
         # Set MoE hyperparameters
+        self.expert_weights = []
         self.num_expert_groups = 1
         self.moe_layers = []
         example_layer = None

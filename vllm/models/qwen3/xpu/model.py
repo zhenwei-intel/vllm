@@ -31,8 +31,15 @@ from torch import nn
 from transformers import Qwen3Config
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig
-from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
+from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
+from vllm.distributed import (
+    get_pp_group,
+    get_tensor_model_parallel_world_size,
+    tensor_model_parallel_all_gather,
+)
+from vllm.distributed.communication_op import (
+    tensor_model_parallel_reduce_scatter,
+)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.encoder_only_attention import (
     Attention,
@@ -62,6 +69,7 @@ from vllm.model_executor.models.utils import (
     PPMissingLayer,
     extract_layer_index,
     maybe_prefix,
+    sequence_parallel_chunk,
 )
 
 logger = init_logger(__name__)
@@ -219,7 +227,28 @@ class Qwen3DecoderLayer(nn.Module):
             config.hidden_size, eps=config.rms_norm_eps
         )
 
+        vllm_config = get_current_vllm_config()
+        parallel_config = vllm_config.parallel_config
+        self.eager_sp = parallel_config.use_eager_sequence_parallel
+        self.fuse_gemm_comms = (
+            parallel_config.enable_eager_sp_fuse_gemm_comms and self.eager_sp
+        )
+        self._sp_threshold = parallel_config.eager_sp_threshold
+        if self.eager_sp:
+            self.self_attn.o_proj.reduce_results = False
+            self.mlp.down_proj.reduce_results = False
+
     def forward(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if self.eager_sp:
+            return self._forward_eager_sp(positions, hidden_states, residual)
+        return self._forward_standard(positions, hidden_states, residual)
+
+    def _forward_standard(
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
@@ -238,6 +267,99 @@ class Qwen3DecoderLayer(nn.Module):
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
         hidden_states = self.mlp(hidden_states)
         return hidden_states, residual
+
+    def _forward_eager_sp(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if residual is None:
+            hidden_states = sequence_parallel_chunk(hidden_states)
+            residual = hidden_states
+            hidden_states = self.input_layernorm(hidden_states)
+        else:
+            hidden_states, residual = self.input_layernorm(hidden_states, residual)
+
+        use_fused = (
+            self.fuse_gemm_comms
+            and hidden_states.shape[0] >= self._sp_threshold
+        )
+
+        if use_fused:
+            hidden_states = self._attn_fused(positions, hidden_states)
+        else:
+            hidden_states = tensor_model_parallel_all_gather(
+                hidden_states, dim=0
+            )
+            hidden_states = self.self_attn(
+                positions=positions, hidden_states=hidden_states
+            )
+            hidden_states = tensor_model_parallel_reduce_scatter(
+                hidden_states, dim=0
+            )
+
+        hidden_states, residual = self.post_attention_layernorm(
+            hidden_states, residual
+        )
+
+        if use_fused:
+            hidden_states = self._mlp_fused(hidden_states)
+        else:
+            hidden_states = tensor_model_parallel_all_gather(
+                hidden_states, dim=0
+            )
+            hidden_states = self.mlp(hidden_states)
+            hidden_states = tensor_model_parallel_reduce_scatter(
+                hidden_states, dim=0
+            )
+
+        return hidden_states, residual
+
+    def _attn_fused(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor:
+        from vllm.distributed import get_tp_group
+
+        group_name = get_tp_group().device_group.group_name
+        attn = self.self_attn
+
+        qkv = attn.qkv_proj.fused_ag_forward(hidden_states, group_name)
+
+        q, k, v = qkv.split(
+            [attn.q_size, attn.kv_size, attn.kv_size], dim=-1
+        )
+        q = attn.q_norm(
+            q.view(
+                *q.shape[:-1], q.shape[-1] // attn.head_dim, attn.head_dim
+            )
+        ).view(q.shape)
+        k = attn.k_norm(
+            k.view(
+                *k.shape[:-1], k.shape[-1] // attn.head_dim, attn.head_dim
+            )
+        ).view(k.shape)
+        q, k = attn.rotary_emb(positions, q, k)
+        attn_output = attn.attn(q, k, v)
+
+        hidden_states = attn.o_proj.fused_rs_forward(attn_output, group_name)
+        return hidden_states
+
+    def _mlp_fused(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        from vllm.distributed import get_tp_group
+
+        group_name = get_tp_group().device_group.group_name
+        mlp = self.mlp
+
+        gate_up = mlp.gate_up_proj.fused_ag_forward(
+            hidden_states, group_name
+        )
+        out = mlp.act_fn(gate_up)
+
+        hidden_states = mlp.down_proj.fused_rs_forward(out, group_name)
+        return hidden_states
 
 
 ALL_DECODER_LAYER_TYPES = {
@@ -258,6 +380,30 @@ class Qwen3Model(Qwen2Model):
         super().__init__(
             vllm_config=vllm_config, prefix=prefix, decoder_layer_type=Qwen3DecoderLayer
         )
+        parallel_config = vllm_config.parallel_config
+        self.eager_sp = parallel_config.use_eager_sequence_parallel
+
+    def forward(
+        self,
+        input_ids: torch.Tensor | None,
+        positions: torch.Tensor,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
+        result = super().forward(
+            input_ids, positions, intermediate_tensors, inputs_embeds
+        )
+        if not self.eager_sp:
+            return result
+        if isinstance(result, IntermediateTensors):
+            return result
+        if isinstance(result, tuple):
+            hidden_states, aux = result
+            hidden_states = tensor_model_parallel_all_gather(
+                hidden_states, dim=0
+            )
+            return hidden_states, aux
+        return tensor_model_parallel_all_gather(result, dim=0)
 
 
 class Qwen3ForCausalLM(
