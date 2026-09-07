@@ -6,6 +6,7 @@ from collections.abc import Sequence
 
 import torch
 
+import vllm.envs as envs
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8DynamicTensorSym,
     kFp8DynamicTokenSym,
@@ -90,9 +91,16 @@ class XPUW8A8FP8LinearKernel(FP8ScaledMMLinearKernel):
                 f"but got {tuple(w.shape)}"
             )
 
-        needs_transpose = w.shape == (N, K) if K != N else w.is_contiguous()
-        layer_weight = w.t() if needs_transpose else w
-        replace_parameter(layer, "weight", layer_weight)
+        # oneDNN needs weight as [K, N]. Default detects and transposes the
+        # checkpoint into a [K, N] view (K-contiguous, "ba"); when forced, store
+        # a contiguous [K, N] buffer (N-contiguous, "ab").
+        force_ab = envs.VLLM_XPU_FORCE_AB_LAYOUT_WEIGHT
+        if force_ab:
+            w = w.data.t().contiguous()
+        else:
+            needs_transpose = w.shape == (N, K) if K != N else w.is_contiguous()
+            w = w.t() if needs_transpose else w
+        replace_parameter(layer, "weight", w)
         ws = layer.weight_scale
         if ws.numel() == 1:
             replace_parameter(layer, "weight_scale", ws.reshape(1))
@@ -239,6 +247,16 @@ class XPUFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         #   - apply_block_scaled_mm recovers the contiguous buffer via .t()
         scale_kn = scale.data.t().contiguous()  # [k_blocks, n_blocks]
         replace_parameter(layer, scale_attr, scale_kn.t())  # view: [n_blocks, k_blocks]
+
+        # Weight is stored as [N, K] and .t()'d to [K, N] in apply. Default keeps
+        # it K-contiguous ("ba"); when forced, repack to N-contiguous ("ab")
+        # while preserving the [N, K] shape.
+        force_ab = envs.VLLM_XPU_FORCE_AB_LAYOUT_WEIGHT and not getattr(
+            layer, "is_bmm", False
+        )
+        if force_ab:
+            weight_kn = layer.weight.data.t().contiguous().t()
+            replace_parameter(layer, "weight", weight_kn)
 
         if getattr(layer, "is_bmm", False):
             self._prepare_bmm_params(layer, scale_kn)

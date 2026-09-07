@@ -310,6 +310,7 @@ if TYPE_CHECKING:
     VLLM_XPU_ENABLE_XPU_GRAPH: bool = False
     VLLM_XPU_USE_SAMPLER_KERNEL: bool = True
     VLLM_XPU_USE_CUSTOM_MODEL: bool = False
+    VLLM_XPU_FORCE_AB_LAYOUT_WEIGHT: bool = False
     VLLM_LORA_ENABLE_DUAL_STREAM: bool = False
     VLLM_GPU_NIC_PCIE_MAPPING: str = ""
     VLLM_NIC_SELECTION_VARS: str = ""
@@ -2109,6 +2110,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Whether to use a custom model on XPU
     "VLLM_XPU_USE_CUSTOM_MODEL": lambda: bool(
         int(os.getenv("VLLM_XPU_USE_CUSTOM_MODEL", "0"))
+    ),
+    # Repack XPU linear weights to an N-contiguous oneDNN "ab" layout instead
+    # of the default K-contiguous "ba" layout. Faster for some shapes, but not
+    # run-to-run bitwise reproducible. Off by default.
+    "VLLM_XPU_FORCE_AB_LAYOUT_WEIGHT": lambda: bool(
+        int(os.getenv("VLLM_XPU_FORCE_AB_LAYOUT_WEIGHT", "0"))
     ),
     # Enable simple KV offload.
     "VLLM_USE_SIMPLE_KV_OFFLOAD": lambda: bool(

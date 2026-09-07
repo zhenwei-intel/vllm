@@ -3,6 +3,7 @@
 
 import torch
 
+import vllm.envs as envs
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     xpu_mxfp8_quantize as quant_mxfp8,
 )
@@ -36,6 +37,16 @@ class XPUMxFp8LinearKernel(Mxfp8LinearKernel):
         weight_scale = layer.weight_scale.view(torch.float8_e8m0fnu)
         scale_kn = weight_scale.data.t().contiguous()
         replace_parameter(layer, "weight_scale", scale_kn.t())
+
+        # Weight is stored as [N, K] and .t()'d to [K, N] in apply. Default keeps
+        # it K-contiguous ("ba"); when forced, repack to N-contiguous ("ab")
+        # while preserving the [N, K] shape.
+        force_ab = envs.VLLM_XPU_FORCE_AB_LAYOUT_WEIGHT and not getattr(
+            layer, "is_bmm", False
+        )
+        if force_ab:
+            weight_kn = layer.weight.data.t().contiguous().t()
+            replace_parameter(layer, "weight", weight_kn)
 
         if getattr(layer, "is_bmm", False):
             self._prepare_bmm_params(layer, scale_kn)

@@ -3,6 +3,7 @@
 
 import torch
 
+import vllm.envs as envs
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
     xpu_mxfp4_quantize as quant_mxfp4,
 )
@@ -34,7 +35,16 @@ class XPUMxFp4LinearKernel(MxFp4LinearKernel):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         weight = layer.weight.view(torch.float4_e2m1fn_x2)
-        replace_parameter(layer, "weight", weight.data.t())
+
+        # oneDNN needs weight as [K, N]. Default keeps a [K, N] .t() view
+        # (K-contiguous, "ba"); when forced, store a contiguous [K, N] buffer
+        # (N-contiguous, "ab").
+        force_ab = envs.VLLM_XPU_FORCE_AB_LAYOUT_WEIGHT
+        if force_ab:
+            weight = weight.data.t().contiguous()
+        else:
+            weight = weight.data.t()
+        replace_parameter(layer, "weight", weight)
 
         weight_scale = layer.weight_scale.view(torch.float8_e8m0fnu)
         weight_scale = weight_scale.t().contiguous()
