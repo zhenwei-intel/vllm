@@ -244,7 +244,7 @@ def flash_attn_supports_kv_cache_dtype(
 
 
 def flash_attn_supports_quant_query_input() -> bool:
-    return not current_platform.is_xpu()
+    return current_platform.support_fp8_query()
 
 
 def flash_attn_supports_sinks() -> bool:

@@ -94,6 +94,14 @@ class QuantizationConfig(ABC):
         ".q_zero_point",
         ".k_zero_point",
         ".v_zero_point",
+        # AutoRound/INC calibration stats (amax/amin observers). If the target
+        # layer does not create matching params, ignore instead of raising errors.
+        ".q_max",
+        ".k_max",
+        ".v_max",
+        ".q_min",
+        ".k_min",
+        ".v_min",
     )
     """Suffixes of quantization parameters that may be present in the checkpoint but
     not in the model, and should be ignored if unexpected during loading. These are used
@@ -223,6 +231,10 @@ class QuantizationConfig(ABC):
             # Default: .{q,k,v}_scale -> .attn.{q,k,v}_scale (unless already .attn)
             re.compile(r"(?<!\.attn)\.([qkv])_scale$"): r".attn.\1_scale",
             re.compile(r"(?<!\.attn)\.([qkv])_zero_point$"): r".attn.\1_zero_point",
+            # AutoRound/INC amax stats: .{q,k,v}_max -> .attn.{q,k,v}_max so they
+            # can be consumed as a scale fallback (scale = max / fp8_max) when the
+            # checkpoint does not ship precomputed attention scales.
+            re.compile(r"(?<!\.attn)\.([qkv])_max$"): r".attn.\1_max",
         }
         return WeightsMapper(orig_to_new_regex=orig_to_new_regex)
 

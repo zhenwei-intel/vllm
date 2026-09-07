@@ -1188,11 +1188,69 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
                 _tp_aware_loader, kind="v", param_type="zero_point"
             )
 
+        # ------------------------------------------------------------------
+        # AutoRound/INC checkpoints may ship raw amax observer stats
+        # (self_attn.{q,k,v}_max) in addition to (or instead of) the
+        # precomputed {q,k,v}_scale tensors. Create placeholder params so the
+        # loader can consume them, and wrap the scale loaders to record
+        # whether a scale was actually loaded from the checkpoint. 
+        # ------------------------------------------------------------------
+        layer._scale_loaded: set[str] = set()
+
+        def _make_marking_scale_loader(kind: str, inner):
+            def _loader(param: torch.Tensor, loaded_weight: torch.Tensor, *a, **kw):
+                layer._scale_loaded.add(kind)
+                if inner is not None:
+                    return inner(param, loaded_weight, *a, **kw)
+                loaded = loaded_weight.flatten().to(param.dtype)
+                if loaded.numel() == param.numel():
+                    param.data.copy_(loaded.view_as(param))
+                else:
+                    param.data.fill_(loaded.max())
+
+            return _loader
+
+        def _max_loader(param: torch.Tensor, loaded_weight: torch.Tensor):
+            loaded = loaded_weight.flatten().to(param.dtype)
+            if loaded.numel() == param.numel():
+                param.data.copy_(loaded.view_as(param))
+            else:
+                param.data.fill_(loaded.max())
+
+        for kind in ("q", "k", "v"):
+            scale_param = getattr(layer, f"{kind}_scale")
+            scale_param.weight_loader = _make_marking_scale_loader(
+                kind, getattr(scale_param, "weight_loader", None)
+            )
+            # -1.0 sentinel: "not loaded from checkpoint".
+            max_param = torch.nn.Parameter(
+                torch.full((n_scales,), -1.0, dtype=torch.float32),
+                requires_grad=False,
+            )
+            max_param.weight_loader = _max_loader
+            setattr(layer, f"{kind}_max", max_param)
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         """
         Override the default vLLM placeholder scales with the llm-compressor loaded
         scales. Zero points are not used as only symmetric quantization is supported.
         """
+        fp8_max = torch.finfo(torch.float8_e4m3fn).max  # 448.0
+        for kind in ("q", "k", "v"):
+            scale_param = getattr(layer, f"{kind}_scale")
+            max_param = getattr(layer, f"{kind}_max", None)
+            scale_loaded = kind in getattr(layer, "_scale_loaded", set())
+            max_loaded = max_param is not None and bool((max_param >= 0).any())
+
+            # Prefer an explicit checkpoint scale. If only the calibration
+            # amax stats (*_max) are present, derive scale = amax / fp8_max.
+            # Otherwise keep the default placeholder (1.0).
+            if not scale_loaded and max_loaded:
+                scale_param.data.copy_(max_param.data / fp8_max)
+
+            if max_param is not None:
+                delattr(layer, f"{kind}_max")
+
         layer._k_scale = layer.k_scale
         layer._v_scale = layer.v_scale
         layer._q_scale = layer.q_scale

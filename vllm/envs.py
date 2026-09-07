@@ -308,6 +308,7 @@ if TYPE_CHECKING:
     VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS: bool = True
     VLLM_NIXL_EP_MAX_NUM_RANKS: int = 32
     VLLM_XPU_ENABLE_XPU_GRAPH: bool = False
+    VLLM_XPU_SUPPORT_FP8_QUERY: bool = False
     VLLM_XPU_USE_SAMPLER_KERNEL: bool = True
     VLLM_XPU_USE_CUSTOM_MODEL: bool = False
     VLLM_XPU_FORCE_AB_LAYOUT_WEIGHT: bool = False
@@ -2102,6 +2103,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Whether enable XPU graph on Intel GPU
     "VLLM_XPU_ENABLE_XPU_GRAPH": lambda: bool(
         int(os.getenv("VLLM_XPU_ENABLE_XPU_GRAPH", "0"))
+    ),
+    # Whether XPU attention backends support FP8 query input
+    "VLLM_XPU_SUPPORT_FP8_QUERY": lambda: bool(
+        int(os.getenv("VLLM_XPU_SUPPORT_FP8_QUERY", "0"))
     ),
     # whether use xpu specific sample kernel
     "VLLM_XPU_USE_SAMPLER_KERNEL": lambda: bool(

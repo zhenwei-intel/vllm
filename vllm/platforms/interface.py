@@ -1074,6 +1074,13 @@ class Platform:
         return False
 
     @classmethod
+    def support_fp8_query(cls) -> bool:
+        """
+        Returns whether the current platform supports FP8 query input.
+        """
+        return True
+
+    @classmethod
     def is_fp8_fnuz(cls) -> bool:
         """
         Returns whether the preferred FP8 type is FNUZ on the current platform.

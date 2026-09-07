@@ -503,6 +503,10 @@ class XPUPlatform(Platform):
         return True
 
     @classmethod
+    def support_fp8_query(cls) -> bool:
+        return envs.VLLM_XPU_SUPPORT_FP8_QUERY
+
+    @classmethod
     def get_default_ir_op_priority(
         cls, vllm_config: "VllmConfig"
     ) -> "IrOpPriorityConfig":
