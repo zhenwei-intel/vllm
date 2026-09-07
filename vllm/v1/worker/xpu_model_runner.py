@@ -135,7 +135,13 @@ class ProfileTraceMixin:
         )
 
         if self._prof_do_trace and self._prof_is_rank0():
-            logger.info("m = %d, step = %d:", self._prof_m, self.step)
+            # Wall-clock timestamp read WITHOUT a device synchronize, so it never
+            # adds a barrier that would perturb the step cadence (see TRACE_SYNC
+            # note in profiling.md). Lets consumers reconstruct per-request
+            # arrival times from a request id's first appearance.
+            logger.info(
+                "m = %d, step = %d, ts = %.6f:", self._prof_m, self.step, time.time()
+            )
             self._log_schedule(scheduler_output)
 
         if self._prof_do_trace:

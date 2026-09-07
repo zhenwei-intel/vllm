@@ -6,7 +6,7 @@
 See docs/contributing/profiling.md ("Per-Step Tracing on XPU") for how to
 produce these logs. Handles the format emitted with TRACE=1:
 
-    m = 3, step = 54:
+    m = 3, step = 54, ts = 1712345678.901234:
         total_requests_num: 3
         total_num_scheduled_tokens: 3
         request id: 1-aaa2f954
@@ -45,7 +45,8 @@ import sys
 # Strip "(EngineCore pid=245) INFO 08-25 10:31:19 [xpu_model_runner.py:127] "
 PREFIX = re.compile(r"^.*?\[[\w.]+:\d+\]\s*")
 
-HEADER = re.compile(r"^m = (\d+), step = (-?\d+):")
+# ``ts`` is optional: logs produced before timestamps were emitted still parse.
+HEADER = re.compile(r"^m = (\d+), step = (-?\d+)(?:, ts = ([\d.]+))?:")
 DEVICE = re.compile(r"^step = (-?\d+), m = (\d+), forward device: ([\d.]+) ms")
 PHASE = re.compile(
     r"^(preprocess|forward|postprocess|execute_model|sample_tokens) time: ([\d.]+) ms"
@@ -53,6 +54,7 @@ PHASE = re.compile(
 STEP_TOTAL = re.compile(r"^step time \(worker\): ([\d.]+) ms")
 TOTAL_REQS = re.compile(r"^total_requests_num: (\d+)")
 TOTAL_TOKS = re.compile(r"^total_num_scheduled_tokens: (\d+)")
+REQ_ID = re.compile(r"^request id: (\S+)")
 CTX_LEN = re.compile(r"^context_len: (\d+)")
 NUM_SCHED = re.compile(r"^num_scheduled_token: (\d+)")
 
@@ -66,6 +68,7 @@ PHASE_FIELD = {
 
 FIELDS = [
     "step",
+    "ts",
     "m",
     "num_requests",
     "prefill_reqs",
@@ -80,14 +83,16 @@ FIELDS = [
     "step_worker_ms",
     "forward_device_ms",
     "device_over_host",
+    "request_ids",
     "context_lens",
     "num_scheduled_tokens",
 ]
 
 
-def new_step(m, step):
+def new_step(m, step, ts=None):
     return {
         "step": step,
+        "ts": ts,
         "m": m,
         "num_requests": None,
         "prefill_reqs": 0,
@@ -102,6 +107,7 @@ def new_step(m, step):
         "step_worker_ms": None,
         "forward_device_ms": None,
         "device_over_host": None,
+        "request_ids": [],
         "context_lens": [],
         "num_scheduled_tokens": [],
     }
@@ -125,11 +131,12 @@ def parse(lines):
         m = HEADER.match(line)
         if m:
             mm, step = int(m.group(1)), int(m.group(2))
+            ts = float(m.group(3)) if m.group(3) is not None else None
             if step in steps:
                 warnings.append(f"duplicate header for step {step}; keeping first")
                 cur = steps[step]
                 continue
-            cur = new_step(mm, step)
+            cur = new_step(mm, step, ts)
             steps[step] = cur
             order.append(step)
             if step in orphan_device:
@@ -163,6 +170,11 @@ def parse(lines):
         r = TOTAL_REQS.match(line)
         if r:
             cur["num_requests"] = int(r.group(1))
+            continue
+
+        rid = REQ_ID.match(line)
+        if rid:
+            cur["request_ids"].append(rid.group(1))
             continue
 
         c = CTX_LEN.match(line)
@@ -212,6 +224,12 @@ def finalize(rows, keep_empty, min_step):
                 f"step {r['step']}: {len(toks)} request entries != "
                 f"total_requests_num {r['num_requests']}"
             )
+        rids = r["request_ids"]
+        if rids and len(rids) != len(toks):
+            warnings.append(
+                f"step {r['step']}: {len(rids)} request ids != "
+                f"{len(toks)} scheduled-token entries"
+            )
 
         dev, host = r["forward_device_ms"], r["forward_ms"]
         if dev is None:
@@ -219,6 +237,7 @@ def finalize(rows, keep_empty, min_step):
         elif host:
             r["device_over_host"] = round(dev / host, 4)
 
+        r["request_ids"] = ";".join(rids)
         r["context_lens"] = ";".join(str(x) for x in r["context_lens"])
         r["num_scheduled_tokens"] = ";".join(str(x) for x in toks)
         out.append(r)

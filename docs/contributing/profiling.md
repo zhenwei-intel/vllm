@@ -290,11 +290,11 @@ All of these are off by default and read once at model runner construction.
 VLLM_USE_V2_MODEL_RUNNER=0 TRACE=1 TRACE_SYNC=0 NUM_WARMUP_STEPS=10 <vllm command>
 ```
 
-Each step logs its batch shape, the per-request context lengths, and a phase
-breakdown:
+Each step logs its batch shape, a wall-clock timestamp, the per-request ids and
+context lengths, and a phase breakdown:
 
 ```text
-m = 3, step = 54:
+m = 3, step = 54, ts = 1712345678.901234:
     total_num_scheduled_tokens: 3
     request id: 1-aaa2f954
         context_len: 64
@@ -308,6 +308,14 @@ execute_model time: 42.991 ms
 sample_tokens time: 0.562 ms
 step time (worker): 43.699 ms
 ```
+
+The `ts =` field is a wall-clock timestamp (`time.time()`) read **without** a
+device synchronize, so it never adds a barrier that would perturb the step
+cadence (unlike `TRACE_SYNC=1` below). Combined with the per-step `request id`
+list, it lets an offline consumer reconstruct each request's arrival time (first
+step it appears in) and follow a request across steps — including preemption,
+which shows up as a request id whose `context_len` resets downward after having
+grown.
 
 `TRACE_SYNC` changes what the host numbers mean and is worth choosing
 deliberately. With `TRACE_SYNC=1` each phase boundary synchronizes, so a phase
@@ -372,10 +380,17 @@ to flatten it into one CSV row per step:
 python tools/profiler/parse_step_trace.py server.log -o steps.csv
 ```
 
-Each row carries the batch shape, per-request context lengths, every host phase,
-the forward device span, and a `device_over_host` ratio. The summary it prints
-separates decode-only steps from steps containing prefill, since their costs
-differ by orders of magnitude and mixing them makes the medians meaningless.
+Each row carries the batch shape, the step timestamp (`ts`), the per-request ids
+(`request_ids`) and context lengths, every host phase, the forward device span,
+and a `device_over_host` ratio. `request_ids`, `context_lens`, and
+`num_scheduled_tokens` are `;`-joined and positionally aligned, so a consumer can
+track any request across steps. The summary it prints separates decode-only
+steps from steps containing prefill, since their costs differ by orders of
+magnitude and mixing them makes the medians meaningless.
+
+Logs produced before the `ts` field existed still parse — the `ts` column is
+left empty and `request_ids` is populated from the `request id` lines, which
+were always present in the raw log.
 
 ### Overhead
 
