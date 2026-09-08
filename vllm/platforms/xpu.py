@@ -161,6 +161,9 @@ class XPUPlatform(Platform):
         if selected_backend == AttentionBackendEnum.TRITON_ATTN:
             logger.info_once("Using Triton backend.")
             return AttentionBackendEnum.TRITON_ATTN.get_path()
+        elif selected_backend == AttentionBackendEnum.XPU_ATTN:
+            logger.info_once("Using XPU_ATTN backend.")
+            return AttentionBackendEnum.XPU_ATTN.get_path()
         elif attn_selector_config.use_mm_prefix:
             # Flash Attention on XPU has no FA4 kernel, so it cannot apply the
             # multimodal prefix-LM bidirectional mask. Honor an explicit Flash
