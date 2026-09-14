@@ -33,6 +33,7 @@ import torch
 from torch import nn
 from transformers import PretrainedConfig
 
+import vllm._custom_ops as ops
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import (
@@ -52,6 +53,10 @@ from vllm.model_executor.layers.fused_moe import (
     GateLinear,
     fused_moe_make_expert_params_mapping,
 )
+from vllm.model_executor.layers.fusion.quant_activation import (
+    fused_rms_norm_quant,
+    fused_silu_and_mul_quant,
+)
 from vllm.model_executor.layers.hpc import HpcRopeNorm, QkNormPolicy
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -70,9 +75,6 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
 )
-from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs.hy_v3 import HYV3Config
-
 from vllm.model_executor.models.interfaces import (
     MixtureOfExperts,
     SupportsLoRA,
@@ -88,6 +90,9 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
     sequence_parallel_chunk,
 )
+from vllm.platforms import current_platform
+from vllm.sequence import IntermediateTensors
+from vllm.transformers_utils.configs.hy_v3 import HYV3Config
 
 logger = init_logger(__name__)
 
@@ -130,8 +135,12 @@ class HYV3FeedForward(nn.Module):
 
     def forward(self, x):
         gate_up, _ = self.gate_up_proj(x)
-        out = self.act_fn(gate_up)
-        out, _ = self.down_proj(out)
+        qa = fused_silu_and_mul_quant(self.down_proj, gate_up)
+        if qa is not None:
+            out, _ = self.down_proj(qa)
+        else:
+            out = self.act_fn(gate_up)
+            out, _ = self.down_proj(out)
         return out
 
 
@@ -332,6 +341,14 @@ class HYV3Attention(nn.Module):
             if self.hpc_rope_norm.use_fp8 and hasattr(self.attn, "query_quant"):
                 self.attn.query_quant = None
 
+        self.use_fused_qk_norm_rope = (
+            self.hpc_rope_norm is None
+            and self.use_qk_norm
+            and current_platform.is_xpu()
+            and self.head_dim in (64, 128, 256, 512)
+            and hasattr(self.rotary_emb, "cos_sin_cache")
+        )
+
     def forward(
         self,
         positions: torch.Tensor,
@@ -345,20 +362,36 @@ class HYV3Attention(nn.Module):
             q = q.view(-1, self.num_heads * self.head_dim)
             attn_output = self.attn(q, k, v, output_shape, self.dtype)
         else:
-            if self.use_qk_norm:
-                q_by_head = q.view(
-                    *q.shape[:-1], q.shape[-1] // self.head_dim, self.head_dim
+            if self.use_fused_qk_norm_rope:
+                ops.fused_qk_norm_rope(
+                    qkv,
+                    self.num_heads,
+                    self.num_kv_heads,
+                    self.num_kv_heads,
+                    self.head_dim,
+                    self.q_norm.variance_epsilon,
+                    self.q_norm.weight,
+                    self.k_norm.weight,
+                    self.rotary_emb.cos_sin_cache,
+                    self.rotary_emb.is_neox_style,
+                    positions,
                 )
-                q_by_head = self.q_norm(q_by_head)
-                q = q_by_head.view(q.shape)
+                attn_output = self.attn(q, k, v, output_shape)
+            else:
+                if self.use_qk_norm:
+                    q_by_head = q.view(
+                        *q.shape[:-1], q.shape[-1] // self.head_dim, self.head_dim
+                    )
+                    q_by_head = self.q_norm(q_by_head)
+                    q = q_by_head.view(q.shape)
 
-                k_by_head = k.view(
-                    *k.shape[:-1], k.shape[-1] // self.head_dim, self.head_dim
-                )
-                k_by_head = self.k_norm(k_by_head)
-                k = k_by_head.view(k.shape)
-            q, k = self.rotary_emb(positions, q, k)
-            attn_output = self.attn(q, k, v, output_shape)
+                    k_by_head = k.view(
+                        *k.shape[:-1], k.shape[-1] // self.head_dim, self.head_dim
+                    )
+                    k_by_head = self.k_norm(k_by_head)
+                    k = k_by_head.view(k.shape)
+                q, k = self.rotary_emb(positions, q, k)
+                attn_output = self.attn(q, k, v, output_shape)
         attn_output = attn_output.view(q.shape[0], -1)
         output, _ = self.o_proj(attn_output)
         return output
@@ -437,18 +470,24 @@ class HYV3DecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
     ) -> torch.Tensor:
-        if residual is None:
-            residual = hidden_states
-            hidden_states = self.input_layernorm(hidden_states)
-        else:
-            hidden_states, residual = self.input_layernorm(hidden_states, residual)
+        hidden_states, residual = fused_rms_norm_quant(
+            self.input_layernorm,
+            getattr(self.self_attn, "qkv_proj", None),
+            hidden_states,
+            residual,
+        )
 
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
         )
 
-        hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
+        hidden_states, residual = fused_rms_norm_quant(
+            self.post_attention_layernorm,
+            getattr(self.mlp, "gate_up_proj", None),
+            hidden_states,
+            residual,
+        )
 
         hidden_states = self.mlp(hidden_states)
 

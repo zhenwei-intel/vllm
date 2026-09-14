@@ -20,6 +20,7 @@ from vllm.model_executor.kernels.linear import init_mxfp8_linear_kernel
 from vllm.model_executor.layers.fused_moe.oracle.mxfp8 import (
     select_mxfp8_moe_backend,
 )
+from vllm.model_executor.layers.fusion.quant_activation import expose_input_quant_key
 from vllm.model_executor.layers.quantization.online.fp8 import (
     _Fp8OnlineLinearBase,
 )
@@ -82,6 +83,7 @@ class Mxfp8OnlineLinearMethod(_Fp8OnlineLinearBase):
         replace_parameter(layer, "weight_scale", weight_scale.data)
 
         self.kernel.process_weights_after_loading(layer)
+        expose_input_quant_key(layer, self.kernel)
 
         layer._already_called_process_weights_after_loading = True
 

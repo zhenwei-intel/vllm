@@ -33,6 +33,7 @@ from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     make_fp8_moe_quant_config,
     select_fp8_moe_backend,
 )
+from vllm.model_executor.layers.fusion.quant_activation import expose_input_quant_key
 from vllm.model_executor.layers.linear import (
     LinearBase,
     LinearMethodBase,
@@ -414,6 +415,8 @@ class Fp8LinearMethod(LinearMethodBase):
             layer.input_scale = None
 
         self.fp8_linear.process_weights_after_loading(layer)
+        # ensure marlin not expose and input scale is corrected.
+        expose_input_quant_key(layer, self.fp8_linear)
 
         from vllm.model_executor.kernels.linear.fused_comm import (
             init_fused_comm_kernel,

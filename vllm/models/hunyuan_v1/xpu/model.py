@@ -50,6 +50,10 @@ from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
     fused_moe_make_expert_params_mapping,
 )
+from vllm.model_executor.layers.fusion.quant_activation import (
+    fused_rms_norm_quant,
+    fused_silu_and_mul_quant,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -145,8 +149,12 @@ class HunYuanMLP(nn.Module):
 
     def forward(self, x):
         gate_up, _ = self.gate_up_proj(x)
-        x = self.act_fn(gate_up)
-        x, _ = self.down_proj(x)
+        qa = fused_silu_and_mul_quant(self.down_proj, gate_up)
+        if qa is not None:
+            x, _ = self.down_proj(qa)
+        else:
+            x = self.act_fn(gate_up)
+            x, _ = self.down_proj(x)
         return x
 
 
@@ -575,18 +583,24 @@ class HunYuanDecoderLayer(nn.Module):
         residual: torch.Tensor | None,
         kv_states: tuple[torch.Tensor] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        if residual is None:
-            residual = hidden_states
-            hidden_states = self.input_layernorm(hidden_states)
-        else:
-            hidden_states, residual = self.input_layernorm(hidden_states, residual)
+        hidden_states, residual = fused_rms_norm_quant(
+            self.input_layernorm,
+            getattr(self.self_attn, "qkv_proj", None),
+            hidden_states,
+            residual,
+        )
         hidden_states, ori_kv_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
             kv_states=kv_states,
         )
 
-        hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
+        hidden_states, residual = fused_rms_norm_quant(
+            self.post_attention_layernorm,
+            getattr(self.mlp, "gate_up_proj", None),
+            hidden_states,
+            residual,
+        )
         hidden_states = self.mlp(hidden_states)
         return hidden_states, residual, ori_kv_states
 

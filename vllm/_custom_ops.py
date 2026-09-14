@@ -388,6 +388,7 @@ def rms_norm_per_block_quant(
     residual: torch.Tensor | None = None,
     is_scale_transposed: bool = False,
     tma_alignment: int = 0,
+    scale_ue8m0: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     assert len(group_size) == 2
     output = torch.empty(input.shape, dtype=quant_dtype, device=input.device)
@@ -422,7 +423,7 @@ def rms_norm_per_block_quant(
         tma_alignment
     )
 
-    torch.ops._C.rms_norm_per_block_quant(
+    args = (
         output,
         input,
         weight,
@@ -433,6 +434,11 @@ def rms_norm_per_block_quant(
         group_size[1],
         is_scale_transposed,
     )
+    if scale_ue8m0:
+        torch.ops._C.rms_norm_per_block_quant(*args, True)
+        scales = scales.to(torch.float8_e8m0fnu)
+    else:
+        torch.ops._C.rms_norm_per_block_quant(*args)
     return output, scales
 
 
@@ -443,6 +449,7 @@ def silu_and_mul_per_block_quant(
     quant_dtype: torch.dtype,
     scale_ub: torch.Tensor | None = None,
     is_scale_transposed: bool = False,
+    scale_ue8m0: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     assert input.ndim == 2, f"input must be 2D [batch, hidden*2], got {input.shape}"
     assert input.shape[-1] % 2 == 0, (
@@ -474,7 +481,7 @@ def silu_and_mul_per_block_quant(
         )
 
     # Call the C++ kernel
-    torch.ops._C.silu_and_mul_per_block_quant(
+    args = (
         output,
         input,
         scales,
@@ -482,6 +489,11 @@ def silu_and_mul_per_block_quant(
         scale_ub,
         is_scale_transposed,
     )
+    if scale_ue8m0:
+        torch.ops._C.silu_and_mul_per_block_quant(*args, True)
+        scales = scales.to(torch.float8_e8m0fnu)
+    else:
+        torch.ops._C.silu_and_mul_per_block_quant(*args)
 
     return output, scales
 

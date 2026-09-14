@@ -8,6 +8,7 @@ import torch
 
 import vllm.envs as envs
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
     kFp8DynamicTensorSym,
     kFp8DynamicTokenSym,
     kFp8StaticChannelSym,
@@ -67,6 +68,11 @@ class XPUW8A8FP8LinearKernel(FP8ScaledMMLinearKernel):
         self, c: FP8ScaledMMLinearLayerConfig, layer_param_names: Sequence[str]
     ) -> None:
         super().__init__(c, layer_param_names)
+
+    def input_quant_key(self) -> QuantKey | None:
+        if self.config.activation_quant_key == kFp8StaticTensorSym:
+            return kFp8StaticTensorSym
+        return None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         """Ensure weight is stored as C-contiguous [K, N] (KN layout).
@@ -205,6 +211,9 @@ class XPUFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         if not current_platform.is_xpu():
             return False, "XPUFp8BlockScaledMM only support on XPU"
         return True, None
+
+    def input_quant_key(self) -> QuantKey | None:
+        return self.config.activation_quant_key
 
     def process_weights_after_loading(self, layer: torch.nn.Module):
         super().process_weights_after_loading(layer)

@@ -3,6 +3,7 @@
 import torch
 
 from vllm.model_executor.kernels.linear import init_mxfp8_linear_kernel
+from vllm.model_executor.layers.fusion.quant_activation import expose_input_quant_key
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     MXFP8_BLOCK_SIZE,
     MXFP8_SCALE_DTYPE,
@@ -74,6 +75,7 @@ class INCMxfp8LinearScheme(INCLinearScheme):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         self.kernel.process_weights_after_loading(layer)
+        expose_input_quant_key(layer, self.kernel)
 
     def apply_weights(
         self,

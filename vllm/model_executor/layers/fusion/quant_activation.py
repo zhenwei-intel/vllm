@@ -12,7 +12,13 @@ from dataclasses import dataclass
 
 import torch
 
-from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    kFp8Dynamic64Sym,
+    kFp8Dynamic128Sym,
+    kFp8StaticTensorSym,
+    kMxfp8Dynamic,
+)
 
 
 @dataclass
@@ -69,3 +75,103 @@ def as_quantized_activation(
         f"input_quant_key {expected_key}"
     )
     return x
+
+
+def fused_silu_and_mul_quant(
+    down_proj: torch.nn.Module, gate_up: torch.Tensor
+) -> "QuantizedActivation | None":
+    key = getattr(down_proj, "input_quant_key", None)
+    hidden_size = gate_up.shape[-1] // 2
+
+    if key == kFp8StaticTensorSym:
+        input_scale = getattr(down_proj, "input_scale", None)
+        if input_scale is None:
+            return None
+        out = torch.empty(
+            (*gate_up.shape[:-1], hidden_size),
+            dtype=key.dtype,
+            device=gate_up.device,
+        )
+        torch.ops._C.silu_and_mul_quant(out, gate_up, input_scale)
+        scale = input_scale
+    elif key in (kFp8Dynamic128Sym, kFp8Dynamic64Sym, kMxfp8Dynamic):
+        from vllm import _custom_ops as ops
+
+        group_size = key.scale.group_shape.col
+        out, scale = ops.silu_and_mul_per_block_quant(
+            gate_up, group_size, key.dtype, scale_ue8m0=key == kMxfp8Dynamic
+        )
+    else:
+        return None
+
+    return QuantizedActivation(
+        data=out,
+        scale=scale,
+        orig_dtype=gate_up.dtype,
+        orig_shape=out.shape,
+        quant_key=key,
+    )
+
+
+def fused_rms_norm_quant(
+    rms_norm: torch.nn.Module,
+    next_linear: "torch.nn.Module | None",
+    hidden: torch.Tensor,
+    residual: "torch.Tensor | None",
+) -> "tuple[QuantizedActivation | torch.Tensor, torch.Tensor]":
+    key = (
+        getattr(next_linear, "input_quant_key", None)
+        if next_linear is not None
+        else None
+    )
+    can_fuse = (
+        key is not None
+        and getattr(rms_norm, "variance_size_override", None) is None
+        and getattr(rms_norm, "has_weight", True)
+    )
+    if can_fuse:
+        eps = rms_norm.variance_epsilon
+        weight = rms_norm.weight.data
+        out = None
+        if key == kFp8StaticTensorSym:
+            input_scale = getattr(next_linear, "input_scale", None)
+            if input_scale is not None:
+                out = torch.empty(hidden.shape, dtype=key.dtype, device=hidden.device)
+                if residual is None:
+                    torch.ops._C.rms_norm_static_fp8_quant(
+                        out, hidden, weight, input_scale, eps
+                    )
+                    residual_out = hidden
+                else:
+                    torch.ops._C.fused_add_rms_norm_static_fp8_quant(
+                        out, hidden, residual, weight, input_scale, eps
+                    )
+                    residual_out = residual
+                scale = input_scale
+        elif key in (kFp8Dynamic128Sym, kFp8Dynamic64Sym, kMxfp8Dynamic):
+            from vllm import _custom_ops as ops
+
+            group_size = key.scale.group_shape.col
+            out, scale = ops.rms_norm_per_block_quant(
+                hidden,
+                weight,
+                eps,
+                key.dtype,
+                [1, group_size],
+                residual=residual,
+                scale_ue8m0=key == kMxfp8Dynamic,
+            )
+            residual_out = hidden if residual is None else residual
+        if out is not None:
+            qa = QuantizedActivation(
+                data=out,
+                scale=scale,
+                orig_dtype=hidden.dtype,
+                orig_shape=out.shape,
+                quant_key=key,
+            )
+            return qa, residual_out
+
+    if residual is None:
+        return rms_norm(hidden), hidden
+    return rms_norm(hidden, residual)

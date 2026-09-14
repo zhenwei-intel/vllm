@@ -1848,6 +1848,7 @@ class ModelOptMxFp8LinearMethod(LinearMethodBase):
         )
 
         self.kernel.process_weights_after_loading(layer)
+        expose_input_quant_key(layer, self.kernel)
 
     def apply(
         self,

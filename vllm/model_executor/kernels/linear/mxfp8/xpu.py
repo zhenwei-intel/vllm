@@ -4,8 +4,16 @@
 import torch
 
 import vllm.envs as envs
+from vllm.model_executor.layers.fusion.quant_activation import (
+    QuantizedActivation,
+    as_quantized_activation,
+)
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     xpu_mxfp8_quantize as quant_mxfp8,
+)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    kMxfp8Dynamic,
 )
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
@@ -27,6 +35,9 @@ class XPUMxFp8LinearKernel(Mxfp8LinearKernel):
     @classmethod
     def can_implement(cls, c: Mxfp8LinearLayerConfig) -> tuple[bool, str | None]:
         return True, None
+
+    def input_quant_key(self) -> QuantKey | None:
+        return kMxfp8Dynamic
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         # Checkpoint scale is [N, K//32] (one E8M0 scale per 32 elements).
@@ -75,11 +86,17 @@ class XPUMxFp8LinearKernel(Mxfp8LinearKernel):
     def apply_weights(
         self,
         layer: torch.nn.Module,
-        x: torch.Tensor,
+        x: "torch.Tensor | QuantizedActivation",
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        out_dtype = x.dtype
-        x_fp8, x_scale = quant_mxfp8(x)
+        qa = as_quantized_activation(x, self.input_quant_key())
+        if qa is not None:
+            x_fp8, x_scale = qa.data, qa.scale
+            out_dtype = qa.orig_dtype
+        else:
+            assert isinstance(x, torch.Tensor)
+            out_dtype = x.dtype
+            x_fp8, x_scale = quant_mxfp8(x)
         # Weight is [N, K]; .t() gives a [K, N] view without copying.
         # Scale is stored as [N, K//32]; .t() recovers the contiguous
         # [K//32, N] buffer that oneDNN expects.
