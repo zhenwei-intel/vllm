@@ -26,6 +26,7 @@ Notes:
 """
 
 import argparse
+import json
 import os
 import shlex
 import signal
@@ -34,28 +35,56 @@ import sys
 import threading
 import time
 from collections import deque
+from datetime import datetime
 from pathlib import Path
 from typing import Deque, Optional
 
 
 DEFAULT_MODEL = "meta-llama/Llama-3.3-70B-Instruct"
 
+# Keep model-specific differences in one JSON list. Values not listed here use
+# the defaults below, so adding a model does not require duplicating commands.
+MODEL_CONFIGS_JSON = r'''
+[
+    {"model": "INCModel/Qwen3-30B-A3B-Instruct-2507-MXFP8-CT-AutoRound", "gpu_memory_utilization": 0.9, "num_prompts": 200, "max_concurrency": 34},
+    {"model": "INCModel/Qwen3-32B-MXFP8-CT-AutoRound", "gpu_memory_utilization": 0.85, "num_prompts": 10, "max_concurrency": 1},
+    {"model": "INCModel2/Qwen3-30B-A3B-Instruct-2507-MXFP8-FP8ATTN-CT-AutoRound", "gpu_memory_utilization": 0.9, "num_prompts": 200, "max_concurrency": 34},
+    {"model": "INCModel2/Qwen3-32B-MXFP8-FP8ATTN-CT-AutoRound", "gpu_memory_utilization": 0.85, "num_prompts": 10, "max_concurrency": 1},
+    {"model": "Qwen/Qwen3-30B-A3B", "gpu_memory_utilization": 0.9, "num_prompts": 200, "max_concurrency": 24},
+    {"model": "Qwen/Qwen3-30B-A3B-FP8", "gpu_memory_utilization": 0.9, "num_prompts": 20, "max_concurrency": 2},
+    {"model": "Qwen/Qwen3-32B", "gpu_memory_utilization": 0.85, "num_prompts": 10, "max_concurrency": 1},
+    {"model": "Qwen/Qwen3-32B-FP8", "gpu_memory_utilization": 0.85, "num_prompts": 10, "max_concurrency": 1}
+]
+'''
+MODEL_CONFIGS = json.loads(MODEL_CONFIGS_JSON)
+
+DEFAULT_GPU_MEMORY_UTILIZATION = 0.9
+DEFAULT_MAX_NUM_BATCHED_TOKENS = 4096
+DEFAULT_MAX_MODEL_LEN = 8192
+DEFAULT_BLOCK_SIZE = 64
+DEFAULT_MAX_NUM_SEQS = 128
+DEFAULT_RANDOM_INPUT_LEN = 3500
+DEFAULT_RANDOM_OUTPUT_LEN = 1500
+
 SERVER_CMD_BASE = [
     "python3",
     "-m",
     "vllm.entrypoints.openai.api_server",
-    "--enforce-eager",
-    "--max-num-seqs",
-    "16",
     "--port",
     "8000",
     "--host",
     "0.0.0.0",
     "--trust-remote-code",
-    "--gpu-memory-util=0.95",
     "--no-enable-prefix-caching",
-    "--max-num-batched-tokens=8192",
-    "--max-model-len=8192",
+    "--max-num-batched-tokens",
+    str(DEFAULT_MAX_NUM_BATCHED_TOKENS),
+    "--max-model-len",
+    str(DEFAULT_MAX_MODEL_LEN),
+    "--block-size",
+    str(DEFAULT_BLOCK_SIZE),
+    "--max-num-seqs",
+    str(DEFAULT_MAX_NUM_SEQS),
+    "--no-enable-log-requests",
 ]
 
 CLIENT_CMD_BASE = [
@@ -66,8 +95,7 @@ CLIENT_CMD_BASE = [
     "serve",
     "--ready-check-timeout-sec",
     "1",
-    "--num-warmups",
-    "1",
+    "--temperature=0",
     "--dataset-name",
     "random",
     "--ignore-eos",
@@ -76,12 +104,59 @@ CLIENT_CMD_BASE = [
     "0.0.0.0",
     "--request-rate",
     "inf",
-    "--max-concurrency",
-    "16",
     "--backend",
     "vllm",
     "--trust-remote-code",
+    "--save-result",
+    "--metric-percentiles",
+    "95,99",
 ]
+
+
+def get_model_config(model: str) -> dict:
+    for config in MODEL_CONFIGS:
+        if config["model"] == model:
+            return config
+    return {}
+
+
+def get_model_env(model: str, model_config: dict, mode: str) -> dict[str, str]:
+    env = {
+        "VLLM_USE_V2_MODEL_RUNNER": "0",
+        "VLLM_XPU_USE_CUSTOM_MODEL": "1",
+    }
+    if mode == "graph":
+        env.update(
+            {
+                "VLLM_USE_BREAKABLE_CUDAGRAPH": "1",
+                "VLLM_XPU_ENABLE_XPU_GRAPH": "1",
+            }
+        )
+    if "FP8ATTN" in model.upper():
+        env["VLLM_XPU_SUPPORT_FP8_QUERY"] = "1"
+    env.update(model_config.get("env", {}))
+    return env
+
+
+def build_log_stem(
+    model: str,
+    random_input_len: int,
+    random_output_len: int,
+    parallel_mode: str,
+    num_prompt: int,
+    max_concurrency: int,
+    timestamp: str,
+) -> str:
+    model_name = model.replace("/", "-")
+    if parallel_mode == "none":
+        parallel_name = "TP1-1"
+    else:
+        parallel_name = f"{parallel_mode[:2].upper()}{parallel_mode[2:]}-{parallel_mode[2:]}"
+    return (
+        f"{model_name}_Length-{random_input_len}-{random_output_len}_"
+        f"{parallel_name}_Prompt-{num_prompt}_BS-_Request-inf_"
+        f"Conc-{max_concurrency}_{timestamp}"
+    )
 
 
 def build_server_cmd(
@@ -90,10 +165,15 @@ def build_server_cmd(
     dtype: str,
     mode: str,
     parallel_mode: str,
+    model_config: dict,
 ) -> list[str]:
     cmd = SERVER_CMD_BASE[:3] + ["--model", model] + SERVER_CMD_BASE[3:]
-    if mode == "graph":
-        cmd = [arg for arg in cmd if arg != "--enforce-eager"]
+    cmd += [
+        "--gpu-memory-utilization",
+        str(model_config.get("gpu_memory_utilization", DEFAULT_GPU_MEMORY_UTILIZATION)),
+    ]
+    if mode == "eager":
+        cmd.append("--enforce-eager")
 
     if parallel_mode.startswith("ep"):
         cmd.append("--enable-expert-parallel")
@@ -108,16 +188,26 @@ def build_server_cmd(
 
 
 def build_client_cmd(
-    model: str, random_input_len: int, random_output_len: int, num_prompt: int
+    model: str,
+    random_input_len: int,
+    random_output_len: int,
+    num_prompt: int,
+    max_concurrency: int,
 ) -> list[str]:
     return (
         CLIENT_CMD_BASE[:5]
         + ["--model", model]
-        + CLIENT_CMD_BASE[5:12]
-        + [f"--random-input-len={random_input_len}", f"--random-output-len={random_output_len}"]
-        + CLIENT_CMD_BASE[12:15]
-        + ["--num-prompt", str(num_prompt)]
-        + CLIENT_CMD_BASE[15:]
+        + CLIENT_CMD_BASE[5:]
+        + [
+            "--num-warmups",
+            str(max_concurrency),
+            f"--random-input-len={random_input_len}",
+            f"--random-output-len={random_output_len}",
+            "--num-prompts",
+            str(num_prompt),
+            "--max-concurrency",
+            str(max_concurrency),
+        ]
     )
 
 
@@ -206,27 +296,26 @@ def main() -> int:
     parser.add_argument(
         "--random-input-len",
         type=int,
-        default=1024,
+        default=DEFAULT_RANDOM_INPUT_LEN,
         help="Random input length used by client benchmark",
     )
     parser.add_argument(
         "--random-output-len",
         type=int,
-        default=4096,
+        default=DEFAULT_RANDOM_OUTPUT_LEN,
         help="Random output length used by client benchmark",
     )
     parser.add_argument(
         "--dtype",
-        default="bfloat16",
-        help="Server dtype value when dtype is enabled",
+        default=None,
+        help="Optionally append a server dtype value",
     )
     parser.add_argument(
         "--mode",
         default="eager",
         choices=["eager", "graph"],
         help=(
-            "Server mode: eager keeps original server cmd; graph removes --enforce-eager "
-            "and adds graph-related env flags"
+            "Server mode: graph enables XPU graph flags; eager adds --enforce-eager"
         ),
     )
     parser.add_argument(
@@ -252,13 +341,46 @@ def main() -> int:
     parser.add_argument(
         "--num-prompt",
         type=int,
-        default=4,
-        help="Number of prompts for client benchmark",
+        default=None,
+        help="Override the model-specific number of client prompts",
+    )
+    parser.add_argument(
+        "--max-concurrency",
+        type=int,
+        default=None,
+        help="Override model-specific concurrency and matching warmup count",
     )
     args = parser.parse_args()
+    model_config = get_model_config(args.model)
+    num_prompt = (
+        args.num_prompt
+        if args.num_prompt is not None
+        else model_config.get("num_prompts", 4)
+    )
+    max_concurrency = (
+        args.max_concurrency
+        if args.max_concurrency is not None
+        else model_config.get("max_concurrency", 1)
+    )
 
-    server_log_path = Path(os.environ.get("SERVER_LOG_FILE", "./vllm_server.log"))
-    client_log_path = Path(os.environ.get("CLIENT_LOG_FILE", "./vllm_client.log"))
+    log_timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    log_stem = build_log_stem(
+        model=args.model,
+        random_input_len=args.random_input_len,
+        random_output_len=args.random_output_len,
+        parallel_mode=args.parallel_mode,
+        num_prompt=num_prompt,
+        max_concurrency=max_concurrency,
+        timestamp=log_timestamp,
+    )
+    default_server_log = f"./{log_stem}_server.log"
+    default_client_log = f"./{log_stem}_client.log"
+    server_log_path = Path(
+        os.environ.get("SERVER_LOG_FILE", default_server_log)
+    ).resolve()
+    client_log_path = Path(
+        os.environ.get("CLIENT_LOG_FILE", default_client_log)
+    ).resolve()
     startup_pattern = os.environ.get("STARTUP_PATTERN", "Application startup complete")
     startup_timeout_sec = args.startup_timeout_sec
 
@@ -269,29 +391,23 @@ def main() -> int:
     server_tail: Deque[str] = deque(maxlen=100)
 
     server_env = os.environ.copy()
-    server_env["VLLM_USE_V2_MODEL_RUNNER"] = "0"
-    server_env_overrides = {
-        "VLLM_USE_V2_MODEL_RUNNER": "0",
-    }
-
-    if args.mode == "graph":
-        server_env["VLLM_USE_BREAKABLE_CUDAGRAPH"] = "1"
-        server_env["VLLM_XPU_ENABLE_XPU_GRAPH"] = "1"
-        server_env_overrides["VLLM_USE_BREAKABLE_CUDAGRAPH"] = "1"
-        server_env_overrides["VLLM_XPU_ENABLE_XPU_GRAPH"] = "1"
+    server_env_overrides = get_model_env(args.model, model_config, args.mode)
+    server_env.update(server_env_overrides)
 
     server_cmd = build_server_cmd(
         model=args.model,
-        include_dtype=not args.no_dtype,
+        include_dtype=args.dtype is not None and not args.no_dtype,
         dtype=args.dtype,
         mode=args.mode,
         parallel_mode=args.parallel_mode,
+        model_config=model_config,
     )
     client_cmd = build_client_cmd(
         model=args.model,
         random_input_len=args.random_input_len,
         random_output_len=args.random_output_len,
-        num_prompt=args.num_prompt,
+        num_prompt=num_prompt,
+        max_concurrency=max_concurrency,
     )
 
     server_proc: Optional[subprocess.Popen] = None
