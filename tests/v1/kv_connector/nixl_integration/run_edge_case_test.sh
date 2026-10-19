@@ -2,9 +2,9 @@
 set -xe
 
 # Parse command line arguments
-KV_BUFFER_DEVICE="cuda"  # Default to cuda
-PREFILL_GPU_ID=4         # Default GPU IDs
-DECODE_GPU_ID=5
+KV_BUFFER_DEVICE=${KV_BUFFER_DEVICE:-cuda}
+PREFILL_GPU_ID="${PREFILL_GPU_ID:-4}"  # Default GPU IDs
+DECODE_GPU_ID="${DECODE_GPU_ID:-5}"
 while [[ $# -gt 0 ]]; do
   case $1 in
     --kv_buffer_device)
@@ -13,11 +13,17 @@ while [[ $# -gt 0 ]]; do
       ;;
     *)
       echo "Unknown option $1"
-      echo "Usage: $0 [--kv_buffer_device <cuda|cpu>]"
+      echo "Usage: $0 [--kv_buffer_device <cuda|xpu|cpu>]"
       exit 1
       ;;
   esac
 done
+
+if [[ "$KV_BUFFER_DEVICE" == "xpu" ]]; then
+  DEVICE_VISIBILITY_ENV=ZE_AFFINITY_MASK
+else
+  DEVICE_VISIBILITY_ENV=CUDA_VISIBLE_DEVICES
+fi
 
 echo "Running edge case tests with kv_buffer_device=$KV_BUFFER_DEVICE (GPUs: $PREFILL_GPU_ID, $DECODE_GPU_ID)"
 
@@ -66,10 +72,11 @@ run_tests_for_model() {
   # Start prefill instance
   PREFILL_PORT=8001
 
-  BASE_CMD="CUDA_VISIBLE_DEVICES=$PREFILL_GPU_ID VLLM_NIXL_SIDE_CHANNEL_PORT=5559 vllm serve $model_name \
+  BASE_CMD="${DEVICE_VISIBILITY_ENV}=$PREFILL_GPU_ID VLLM_NIXL_SIDE_CHANNEL_PORT=5559 vllm serve $model_name \
   --port $PREFILL_PORT \
   --enforce-eager \
   --gpu-memory-utilization 0.2 \
+  --max-model-len 8192 \
   --kv-transfer-config '$KV_CONFIG'"
 
   FULL_CMD="$BASE_CMD"
@@ -80,10 +87,11 @@ run_tests_for_model() {
   DECODE_PORT=8002
 
   # Build the command with or without model-specific args
-  BASE_CMD="CUDA_VISIBLE_DEVICES=$DECODE_GPU_ID VLLM_NIXL_SIDE_CHANNEL_PORT=6000 vllm serve $model_name \
+  BASE_CMD="${DEVICE_VISIBILITY_ENV}=$DECODE_GPU_ID VLLM_NIXL_SIDE_CHANNEL_PORT=6000 vllm serve $model_name \
   --port $DECODE_PORT \
   --enforce-eager \
   --gpu-memory-utilization 0.2 \
+  --max-model-len 8192 \
   --kv-transfer-config '$KV_CONFIG'"
 
   FULL_CMD="$BASE_CMD"
@@ -98,7 +106,7 @@ run_tests_for_model() {
 
   # Build the command for the proxy server with all the hosts and ports
   PROXY_PORT=8192
-  PROXY_CMD="python ${GIT_ROOT}/tests/v1/kv_connector/nixl_integration/toy_proxy_server.py --port $PROXY_PORT"
+  PROXY_CMD="python3 ${GIT_ROOT}/tests/v1/kv_connector/nixl_integration/toy_proxy_server.py --port $PROXY_PORT"
   PROXY_CMD+=" --prefiller-ports ${PREFILL_PORT}"
   PROXY_CMD+=" --decoder-ports ${DECODE_PORT}"
   # Start the proxy server
@@ -110,7 +118,7 @@ run_tests_for_model() {
 
   # Run lm eval for this model
   echo "Running tests for $model_name"
-  PREFILL_PORT=$PREFILL_PORT DECODE_PORT=$DECODE_PORT PROXY_PORT=$PROXY_PORT python -m pytest -s -v "${GIT_ROOT}"/tests/v1/kv_connector/nixl_integration/test_edge_cases.py
+  PREFILL_PORT=$PREFILL_PORT DECODE_PORT=$DECODE_PORT PROXY_PORT=$PROXY_PORT python3 -m pytest -s -v "${GIT_ROOT}"/tests/v1/kv_connector/nixl_integration/test_edge_cases.py
 
   # Clean up before running next model
   cleanup_instances
