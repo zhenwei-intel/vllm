@@ -2,7 +2,7 @@
 set -xe
 
 # Parse command line arguments
-KV_BUFFER_DEVICE="cuda"  # Default to cuda
+KV_BUFFER_DEVICE=${KV_BUFFER_DEVICE:-cuda}
 ATTENTION_BACKEND=""  # Default to empty (use vllm default)
 CROSS_LAYERS_BLOCKS="False"
 
@@ -31,10 +31,8 @@ done
 SMI_BIN=$(which nvidia-smi || which rocm-smi || which xpu-smi || echo "")
 
 if [[ "$SMI_BIN" == *"xpu-smi"* ]]; then
-  KV_BUFFER_DEVICE=${KV_BUFFER_DEVICE:-xpu}
   DEVICE_VISIBILITY_ENV=ZE_AFFINITY_MASK
 else
-  KV_BUFFER_DEVICE=${KV_BUFFER_DEVICE:-cuda}
   DEVICE_VISIBILITY_ENV=CUDA_VISIBLE_DEVICES
 fi
 

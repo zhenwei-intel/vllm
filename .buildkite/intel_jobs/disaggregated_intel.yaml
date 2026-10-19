@@ -26,4 +26,4 @@ steps:
     - >-
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
       'cd tests &&
-      bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh'
+      KV_BUFFER_DEVICE=xpu bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh'
