@@ -11,10 +11,21 @@ MODEL=${MODEL:-"ibm-granite/granite-4.0-h-tiny"}
 GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-0.8}
 VLLM_SERVE_EXTRA_ARGS=${VLLM_SERVE_EXTRA_ARGS:-}
 ATTENTION_BACKEND=${ATTENTION_BACKEND:-FLASHINFER}
+KV_BUFFER_DEVICE=${KV_BUFFER_DEVICE:-cuda}
 
-echo "Running Mamba prefix cache test (GPUs: P=$PREFILL_GPU_ID, D=$DECODE_GPU_ID, model=$MODEL, backend=$ATTENTION_BACKEND)"
+echo "Running Mamba prefix cache test (GPUs: P=$PREFILL_GPU_ID, D=$DECODE_GPU_ID, model=$MODEL, backend=$ATTENTION_BACKEND, kv_buffer_device=$KV_BUFFER_DEVICE)"
 
-KV_CONFIG='{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+if [[ "$KV_BUFFER_DEVICE" == "cuda" ]]; then
+  KV_CONFIG='{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+else
+  KV_CONFIG="{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\",\"kv_buffer_device\":\"$KV_BUFFER_DEVICE\"}"
+fi
+
+if [[ "$KV_BUFFER_DEVICE" == "xpu" ]]; then
+  DEVICE_VISIBILITY_ENV=ZE_AFFINITY_MASK
+else
+  DEVICE_VISIBILITY_ENV=CUDA_VISIBLE_DEVICES
+fi
 
 # Resolve repository root
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
@@ -48,7 +59,7 @@ fi
 
 # Start prefill instance
 PREFILL_PORT=8001
-CUDA_VISIBLE_DEVICES=$PREFILL_GPU_ID \
+env "${DEVICE_VISIBILITY_ENV}=$PREFILL_GPU_ID" \
 VLLM_SSM_CONV_STATE_LAYOUT=DS \
 VLLM_KV_CACHE_LAYOUT=HND \
 VLLM_NIXL_SIDE_CHANNEL_PORT=5559 \
@@ -65,7 +76,7 @@ vllm serve "$MODEL" \
 
 # Start decode instance
 DECODE_PORT=8002
-CUDA_VISIBLE_DEVICES=$DECODE_GPU_ID \
+env "${DEVICE_VISIBILITY_ENV}=$DECODE_GPU_ID" \
 VLLM_SSM_CONV_STATE_LAYOUT=DS \
 VLLM_KV_CACHE_LAYOUT=HND \
 VLLM_NIXL_SIDE_CHANNEL_PORT=6000 \

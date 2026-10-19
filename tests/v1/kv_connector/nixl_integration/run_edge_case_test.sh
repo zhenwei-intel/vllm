@@ -2,7 +2,7 @@
 set -xe
 
 # Parse command line arguments
-KV_BUFFER_DEVICE="cuda"  # Default to cuda
+KV_BUFFER_DEVICE=${KV_BUFFER_DEVICE:-cuda}
 PREFILL_GPU_ID="${PREFILL_GPU_ID:-4}"  # Default GPU IDs
 DECODE_GPU_ID="${DECODE_GPU_ID:-5}"
 while [[ $# -gt 0 ]]; do
@@ -13,11 +13,17 @@ while [[ $# -gt 0 ]]; do
       ;;
     *)
       echo "Unknown option $1"
-      echo "Usage: $0 [--kv_buffer_device <cuda|cpu>]"
+      echo "Usage: $0 [--kv_buffer_device <cuda|xpu|cpu>]"
       exit 1
       ;;
   esac
 done
+
+if [[ "$KV_BUFFER_DEVICE" == "xpu" ]]; then
+  DEVICE_VISIBILITY_ENV=ZE_AFFINITY_MASK
+else
+  DEVICE_VISIBILITY_ENV=CUDA_VISIBLE_DEVICES
+fi
 
 echo "Running edge case tests with kv_buffer_device=$KV_BUFFER_DEVICE (GPUs: $PREFILL_GPU_ID, $DECODE_GPU_ID)"
 
@@ -66,7 +72,7 @@ run_tests_for_model() {
   # Start prefill instance
   PREFILL_PORT=8001
 
-  BASE_CMD="CUDA_VISIBLE_DEVICES=$PREFILL_GPU_ID VLLM_NIXL_SIDE_CHANNEL_PORT=5559 vllm serve $model_name \
+  BASE_CMD="${DEVICE_VISIBILITY_ENV}=$PREFILL_GPU_ID VLLM_NIXL_SIDE_CHANNEL_PORT=5559 vllm serve $model_name \
   --port $PREFILL_PORT \
   --enforce-eager \
   --gpu-memory-utilization 0.2 \
@@ -81,7 +87,7 @@ run_tests_for_model() {
   DECODE_PORT=8002
 
   # Build the command with or without model-specific args
-  BASE_CMD="CUDA_VISIBLE_DEVICES=$DECODE_GPU_ID VLLM_NIXL_SIDE_CHANNEL_PORT=6000 vllm serve $model_name \
+  BASE_CMD="${DEVICE_VISIBILITY_ENV}=$DECODE_GPU_ID VLLM_NIXL_SIDE_CHANNEL_PORT=6000 vllm serve $model_name \
   --port $DECODE_PORT \
   --enforce-eager \
   --gpu-memory-utilization 0.2 \

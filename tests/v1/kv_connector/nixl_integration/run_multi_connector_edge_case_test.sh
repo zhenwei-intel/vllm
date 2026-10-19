@@ -20,6 +20,7 @@
 #   KV_CACHE_MEMORY_BYTES    - GPU KV cache size in bytes (default: 268435456 = 256 MiB)
 #   BLOCK_SIZE               - KV cache block size (default: 128)
 #   ATTENTION_BACKEND        - optional attention backend for vllm serve
+#   KV_BUFFER_DEVICE         - NIXL KV buffer device (default: cuda; use xpu for XPU)
 #   VLLM_SERVE_EXTRA_ARGS    - comma-separated extra args for vllm serve
 set -xe
 
@@ -37,6 +38,13 @@ MAX_MODEL_LEN=${MAX_MODEL_LEN:-2048}
 BLOCK_SIZE=${BLOCK_SIZE:-128}
 ATTENTION_BACKEND=${ATTENTION_BACKEND:-}
 VLLM_SERVE_EXTRA_ARGS=${VLLM_SERVE_EXTRA_ARGS:-}
+KV_BUFFER_DEVICE=${KV_BUFFER_DEVICE:-cuda}
+
+if [[ "$KV_BUFFER_DEVICE" == "xpu" ]]; then
+  DEVICE_VISIBILITY_ENV=ZE_AFFINITY_MASK
+else
+  DEVICE_VISIBILITY_ENV=CUDA_VISIBLE_DEVICES
+fi
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 GIT_ROOT="${GIT_ROOT:-$(cd -- "${SCRIPT_DIR}/../../../.." && pwd -P)}"
@@ -48,7 +56,8 @@ KV_CONFIG='{
   "kv_role":"kv_both",
   "kv_connector_extra_config":{
     "connectors":[
-      {"kv_connector":"NixlConnector","kv_role":"kv_both"},
+      {"kv_connector":"NixlConnector","kv_role":"kv_both",
+       "kv_buffer_device":"'$KV_BUFFER_DEVICE'"},
       {"kv_connector":"OffloadingConnector","kv_role":"kv_both",
        "kv_connector_extra_config":{"cpu_bytes_to_use":2147483648}}
     ]
@@ -94,7 +103,7 @@ run_tests_for_model() {
 
   # ── Start prefill instance ──
   echo "Starting prefill instance on GPU $PREFILL_GPU, port $PREFILL_PORT"
-  BASE_CMD="CUDA_VISIBLE_DEVICES=$PREFILL_GPU \
+  BASE_CMD="${DEVICE_VISIBILITY_ENV}=$PREFILL_GPU \
     VLLM_KV_CACHE_LAYOUT='LBHNC' \
     UCX_NET_DEVICES=all \
     VLLM_NIXL_SIDE_CHANNEL_PORT=$PREFILL_SIDE_CHANNEL_PORT \
@@ -120,7 +129,7 @@ run_tests_for_model() {
 
   # ── Start decode instance ──
   echo "Starting decode instance on GPU $DECODE_GPU, port $DECODE_PORT"
-  BASE_CMD="CUDA_VISIBLE_DEVICES=$DECODE_GPU \
+  BASE_CMD="${DEVICE_VISIBILITY_ENV}=$DECODE_GPU \
     VLLM_KV_CACHE_LAYOUT='LBHNC' \
     UCX_NET_DEVICES=all \
     VLLM_NIXL_SIDE_CHANNEL_PORT=$DECODE_SIDE_CHANNEL_PORT \

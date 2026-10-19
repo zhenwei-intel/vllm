@@ -15,7 +15,7 @@
 #
 # Environment variables:
 #   KV_BUFFER_DEVICES   - space-separated list of devices to test
-#                         (default: "cuda cpu")
+#                         (default: "cuda cpu", or "xpu cpu" on XPU)
 #   SD_METHOD           - spec decode method (default: eagle3)
 #   SD_MODEL            - drafter model path
 #   MODEL_NAME          - target model (default: meta-llama/Llama-3.1-8B-Instruct)
@@ -23,7 +23,7 @@
 #   GPU_MEMORY_UTILIZATION - used when KV_CACHE_MEMORY_BYTES is unset (default: 0.7)
 #   KV_CACHE_MEMORY_BYTES - optional KV cache size per server
 #   ATTENTION_BACKEND   - attention backend to use
-#                         Default: TRITON_ATTN on ROCm, FLASH_ATTN on NVIDIA
+#                         Default: TRITON_ATTN on ROCm, FLASH_ATTN on NVIDIA/XPU
 #                         ROCm options: TRITON_ATTN, ROCM_ATTN, ROCM_AITER_FA,
 #                                       ROCM_AITER_UNIFIED_ATTN
 #                         NVIDIA options: FLASH_ATTN, FLASHINFER
@@ -44,7 +44,7 @@ DECODE_SPEC_CONFIG="{\"method\":\"${SD_METHOD}\",\"model\":\"${SD_MODEL}\",\"num
 
 # ── Test matrix ──────────────────────────────────────────────────────────
 
-KV_BUFFER_DEVICES="${KV_BUFFER_DEVICES:-cuda cpu}"
+KV_BUFFER_DEVICES="${KV_BUFFER_DEVICES:-}"
 
 # ── Cluster layout ───────────────────────────────────────────────────────
 
@@ -68,18 +68,29 @@ fi
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 GIT_ROOT="${GIT_ROOT:-$(cd -- "${SCRIPT_DIR}/../../../.." && pwd -P)}"
 
-SMI_BIN=$(which nvidia-smi || which rocm-smi || echo "")
+SMI_BIN=$(which nvidia-smi || which rocm-smi || which xpu-smi || echo "")
 
-# ── Detect platform (NVIDIA vs ROCm) ────────────────────────────────────
+# ── Detect platform (NVIDIA vs ROCm vs XPU) ─────────────────────────────
 
 if [[ "$SMI_BIN" == *"rocm"* ]]; then
   GPU_PLATFORM="rocm"
   GPU_DEVICE_VAR="HIP_VISIBLE_DEVICES"
+elif [[ "$SMI_BIN" == *"xpu-smi"* ]]; then
+  GPU_PLATFORM="xpu"
+  GPU_DEVICE_VAR="ZE_AFFINITY_MASK"
 else
   GPU_PLATFORM="nvidia"
   GPU_DEVICE_VAR="CUDA_VISIBLE_DEVICES"
 fi
 echo "Detected GPU platform: ${GPU_PLATFORM} (using ${GPU_DEVICE_VAR})"
+
+if [[ -z "$KV_BUFFER_DEVICES" ]]; then
+  if [[ "$GPU_PLATFORM" == "xpu" ]]; then
+    KV_BUFFER_DEVICES="xpu cpu"
+  else
+    KV_BUFFER_DEVICES="cuda cpu"
+  fi
+fi
 
 # ── Attention backend config ─────────────────────────────────────────────
 
@@ -174,8 +185,8 @@ wait_for_nixl_side_channel() {
 
 # ── Resolve GPU list ─────────────────────────────────────────────────────
 
-# Accept either CUDA_VISIBLE_DEVICES or HIP_VISIBLE_DEVICES
-VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-${HIP_VISIBLE_DEVICES:-}}"
+# Accept CUDA_VISIBLE_DEVICES, HIP_VISIBLE_DEVICES or ZE_AFFINITY_MASK
+VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-${HIP_VISIBLE_DEVICES:-${ZE_AFFINITY_MASK:-}}}"
 
 if [[ -n "${VISIBLE_DEVICES}" ]]; then
   IFS=',' read -ra ALL_GPUS <<< "$VISIBLE_DEVICES"
@@ -185,6 +196,8 @@ else
     num=$($SMI_BIN --query-gpu=name --format=csv,noheader | wc -l)
   elif [[ "$GPU_PLATFORM" == "rocm" ]]; then
     num=$($SMI_BIN -l | grep -c GPU)
+  elif [[ "$GPU_PLATFORM" == "xpu" ]]; then
+    num=$(python3 -c "import torch; print(torch.xpu.device_count())")
   else
     num=1
   fi
