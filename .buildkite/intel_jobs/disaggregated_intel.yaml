@@ -1,0 +1,29 @@
+group: Disaggregated Intel
+depends_on:
+  - image-build-xpu
+steps:
+- label: ":intel: (BMG) Distributed NixlConnector PD accuracy"
+  key: distributed-nixlconnector-pd-accuracy-4-gpus-intel
+  timeout_in_minutes: 60
+  num_devices: 4
+  device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 4+
+    mem: 16+
+  no_plugin: true
+  working_dir: "."
+  env:
+    REGISTRY: "public.ecr.aws/q9t5s3a7"
+    REPO: "vllm-ci-test-repo"
+    VLLM_TEST_DEVICE: "xpu"
+  source_file_dependencies:
+    - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
+    - tests/v1/kv_connector/nixl_integration/
+    - vllm/platforms/xpu.py
+    - .buildkite/intel_jobs/disaggregated_intel.yaml
+  commands:
+    - >-
+      bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+      'cd tests &&
+      bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh'

@@ -22,11 +22,21 @@ while [[ $# -gt 0 ]]; do
       ;;
     *)
       echo "Unknown option $1"
-      echo "Usage: $0 [--kv_buffer_device <cuda|cpu>] [--attention-backend <backend>]"
+      echo "Usage: $0 [--kv_buffer_device <cuda|xpu|cpu>] [--attention-backend <backend>]"
       exit 1
       ;;
   esac
 done
+
+SMI_BIN=$(which nvidia-smi || which rocm-smi || which xpu-smi || echo "")
+
+if [[ "$SMI_BIN" == *"xpu-smi"* ]]; then
+  KV_BUFFER_DEVICE=${KV_BUFFER_DEVICE:-xpu}
+  DEVICE_VISIBILITY_ENV=ZE_AFFINITY_MASK
+else
+  KV_BUFFER_DEVICE=${KV_BUFFER_DEVICE:-cuda}
+  DEVICE_VISIBILITY_ENV=CUDA_VISIBLE_DEVICES
+fi
 
 echo "Running accuracy tests with kv_buffer_device=$KV_BUFFER_DEVICE"
 if [[ -n "$ATTENTION_BACKEND" ]]; then
@@ -97,8 +107,6 @@ INTERNAL_PORT_STRIDE=${INTERNAL_PORT_STRIDE:-100}
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 GIT_ROOT="${GIT_ROOT:-$(cd -- "${SCRIPT_DIR}/../../../.." && pwd -P)}"
 
-SMI_BIN=$(which nvidia-smi || which rocm-smi || echo "")
-
 # Trap the SIGINT signal (triggered by Ctrl+C)
 trap 'kill $(jobs -pr) 2>/dev/null || true' SIGINT SIGTERM EXIT
 
@@ -133,6 +141,8 @@ get_num_gpus() {
     $SMI_BIN --query-gpu=name --format=csv,noheader | wc -l
   elif [[ "$SMI_BIN" == *"rocm"* ]]; then
     $SMI_BIN -l | grep -c GPU
+  elif [[ "$SMI_BIN" == *"xpu-smi"* ]]; then
+    python3 -c "import torch; print(torch.xpu.device_count())"
   else
     # works for non-cuda platforms,
     # assuming at least 1 device and
@@ -177,7 +187,7 @@ run_tests_for_model() {
     echo "Starting prefill instance $i on GPU $GPU_ID, port $PORT"
 
     # Build the command with or without model-specific args
-    BASE_CMD="CUDA_VISIBLE_DEVICES=$GPU_ID \
+    BASE_CMD="$DEVICE_VISIBILITY_ENV=$GPU_ID \
     ${PREFILLER_KV_LAYOUT:+VLLM_KV_CACHE_LAYOUT=$PREFILLER_KV_LAYOUT} \
     VLLM_PORT=$INTERNAL_PORT \
     UCX_NET_DEVICES=all \
@@ -240,7 +250,7 @@ run_tests_for_model() {
     echo "Starting decode instance $i on GPU $GPU_ID, port $PORT"
 
     # Build the command with or without model-specific args
-    BASE_CMD="CUDA_VISIBLE_DEVICES=$GPU_ID \
+    BASE_CMD="$DEVICE_VISIBILITY_ENV=$GPU_ID \
     ${DECODER_KV_LAYOUT:+VLLM_KV_CACHE_LAYOUT=$DECODER_KV_LAYOUT} \
     $DECODER_INTERNAL_PORT_ENV \
     UCX_NET_DEVICES=all \
